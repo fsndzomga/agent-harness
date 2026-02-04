@@ -85,13 +85,101 @@ if __name__ == "__main__":
 
 ### Any Language
 
-Write agents in any language - just implement the JSON-RPC protocol:
+Write agents in any language - the harness auto-detects how to run them based on file extension or project structure.
 
+#### Supported Languages
+
+| Language | File Extension | Directory Entry | Project Detection |
+|----------|---------------|-----------------|-------------------|
+| Python | `.py` | `agent.py`, `__main__.py` | - |
+| Ruby | `.rb` | `agent.rb` | `Gemfile` → `bundle exec` |
+| JavaScript | `.js`, `.mjs` | `agent.js` | `package.json` → `npm start` |
+| TypeScript | `.ts` | `agent.ts` | - |
+| Bash | `.sh` | `agent.sh` | - |
+| Perl | `.pl` | `agent.pl` | - |
+| PHP | `.php` | `agent.php` | - |
+| Lua | `.lua` | `agent.lua` | - |
+| Julia | `.jl` | `agent.jl` | - |
+| R | `.r`, `.R` | - | - |
+| Go | - | `main.go` | `go.mod` → `go run` |
+| Rust | - | - | `Cargo.toml` → `cargo run` |
+| Any compiled | - | `agent` (binary) | - |
+
+#### Examples
+
+**Ruby agent** (`agent.rb`):
+```ruby
+#!/usr/bin/env ruby
+require 'json'
+
+ARGF.each_line do |line|
+  msg = JSON.parse(line)
+  if msg["method"] == "run_task"
+    task_id = msg["params"]["task_id"]
+    question = msg["params"]["task_data"]["question"]
+    
+    # Your agent logic here
+    answer = "42"
+    
+    result = { jsonrpc: "2.0", id: msg["id"], result: { task_id: task_id, submission: answer } }
+    puts result.to_json
+  end
+end
+```
+
+**Node.js agent** (`agent.js`):
+```javascript
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'run_task') {
+    const { task_id, task_data } = msg.params;
+    
+    // Your agent logic here
+    const answer = "42";
+    
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: { task_id, submission: answer }
+    }));
+  }
+});
+```
+
+**Bash agent** (`agent.sh`):
 ```bash
 #!/bin/bash
 read line
 task_id=$(echo "$line" | jq -r '.params.task_id')
-echo "{\"jsonrpc\": \"2.0\", \"result\": {\"task_id\": \"$task_id\", \"submission\": \"hello\"}, \"id\": 1}"
+msg_id=$(echo "$line" | jq -r '.id')
+echo "{\"jsonrpc\": \"2.0\", \"result\": {\"task_id\": \"$task_id\", \"submission\": \"hello\"}, \"id\": $msg_id}"
+```
+
+**Rust agent** (with `Cargo.toml`):
+```bash
+# Directory structure:
+# my-rust-agent/
+#   Cargo.toml
+#   src/main.rs
+
+harness run --agent ./my-rust-agent --benchmark arithmetic
+# Runs: cargo run --manifest-path ./my-rust-agent/Cargo.toml --
+```
+
+**Custom run command** (`manifest.yaml`):
+```yaml
+# my-agent/manifest.yaml
+run: python -m my_custom_module
+# or: ./my_binary --flag
+# or: dotnet run
+```
+
+Then run:
+```bash
+harness run --agent ./my-agent --benchmark gaia-level1
 ```
 
 ## Benchmarks

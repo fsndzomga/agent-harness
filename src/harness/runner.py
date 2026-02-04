@@ -43,23 +43,62 @@ class AgentRunner:
                 except ImportError:
                     pass  # yaml not installed, skip manifest
         
-        if p.is_file():
-            if p.suffix == ".py":
-                return ["python", str(p)]
-            elif p.suffix == ".sh":
-                return ["bash", str(p)]
-            else:
-                return [str(p)]  # Assume executable
+        # File extension mapping
+        ext_commands = {
+            ".py": ["python"],
+            ".sh": ["bash"],
+            ".rb": ["ruby"],
+            ".js": ["node"],
+            ".ts": ["npx", "ts-node"],
+            ".mjs": ["node"],
+            ".pl": ["perl"],
+            ".php": ["php"],
+            ".lua": ["lua"],
+            ".r": ["Rscript"],
+            ".R": ["Rscript"],
+            ".jl": ["julia"],
+        }
         
-        # Directory: look for entry points
-        if (p / "agent.py").exists():
-            return ["python", str(p / "agent.py")]
-        if (p / "agent.sh").exists():
-            return ["bash", str(p / "agent.sh")]
-        if (p / "agent").exists():
-            return [str(p / "agent")]
-        if (p / "__main__.py").exists():
-            return ["python", str(p)]
+        if p.is_file():
+            if p.suffix in ext_commands:
+                return ext_commands[p.suffix] + [str(p)]
+            else:
+                return [str(p)]  # Assume executable (Go binary, Rust binary, etc.)
+        
+        # Directory: look for entry points (in priority order)
+        entry_points = [
+            ("agent.py", ["python"]),
+            ("agent.rb", ["ruby"]),
+            ("agent.js", ["node"]),
+            ("agent.ts", ["npx", "ts-node"]),
+            ("agent.sh", ["bash"]),
+            ("agent.pl", ["perl"]),
+            ("agent.php", ["php"]),
+            ("agent.lua", ["lua"]),
+            ("agent.jl", ["julia"]),
+            ("main.go", ["go", "run"]),
+            ("agent", []),  # Compiled binary
+            ("__main__.py", ["python"]),
+        ]
+        
+        for filename, cmd in entry_points:
+            entry = p / filename
+            if entry.exists():
+                if cmd:
+                    return cmd + [str(entry)]
+                else:
+                    return [str(entry)]
+        
+        # Check for project files that indicate how to run
+        if (p / "Cargo.toml").exists():
+            return ["cargo", "run", "--manifest-path", str(p / "Cargo.toml"), "--"]
+        if (p / "go.mod").exists() and (p / "main.go").exists():
+            return ["go", "run", str(p)]
+        if (p / "package.json").exists():
+            # Check for start script or main entry
+            return ["npm", "start", "--prefix", str(p)]
+        if (p / "Gemfile").exists() and (p / "agent.rb").exists():
+            return ["bundle", "exec", "ruby", str(p / "agent.rb")]
         
         raise ValueError(f"Cannot determine how to run agent at {p}")
     
