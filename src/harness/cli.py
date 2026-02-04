@@ -1,10 +1,66 @@
 """CLI for agent harness."""
 
 import json
+import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+
+
+def slugify(text: str, max_len: int = 30) -> str:
+    """Convert text to filesystem-safe slug."""
+    # Take last component if path-like (e.g., openrouter/deepseek/model -> model)
+    if "/" in text:
+        text = text.split("/")[-1]
+    # Remove extension
+    text = re.sub(r"\.[^.]+$", "", text)
+    # Replace non-alphanumeric with dashes
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", text)
+    # Remove leading/trailing dashes
+    text = text.strip("-").lower()
+    # Truncate
+    return text[:max_len].rstrip("-")
+
+
+def generate_run_id(
+    benchmark: str | None = None,
+    agent: str | None = None,
+    model: str | None = None,
+) -> str:
+    """
+    Generate a unique, descriptive run ID.
+    
+    Format: {benchmark}_{agent}_{model}_{YYYYMMDD_HHMMSS}_{random6}
+    Example: gaia-level1_simple-qa-agent_deepseek-chat_20260204_224800_a3f2b1
+    
+    This provides:
+    - Human-readable identification of what was run
+    - Chronological sortability via timestamp
+    - Collision resistance via timestamp + 24-bit random (< 1 in 16M same-second collision)
+    - Billions of runs without practical collision risk
+    """
+    parts = []
+    
+    if benchmark:
+        parts.append(slugify(benchmark, 20))
+    
+    if agent:
+        parts.append(slugify(Path(agent).stem, 25))
+    
+    if model:
+        parts.append(slugify(model, 25))
+    
+    # Timestamp for sortability and uniqueness
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    parts.append(ts)
+    
+    # Random suffix for same-second uniqueness (6 hex = 24 bits)
+    rand_suffix = uuid.uuid4().hex[:6]
+    parts.append(rand_suffix)
+    
+    return "_".join(parts)
 
 # Load .env file if present
 try:
@@ -76,7 +132,8 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
 @click.option("--agent", required=True, type=click.Path(exists=True), help="Path to agent")
 @click.option("--benchmark", "-b", help="Benchmark name (e.g., 'arithmetic', 'gaia')")
 @click.option("--tasks-file", type=click.Path(exists=True), help="JSONL file with tasks (alternative to --benchmark)")
-@click.option("--output", "-o", required=True, type=click.Path(), help="Output directory")
+@click.option("--output", "-o", type=click.Path(), default="./results", help="Base output directory (default: ./results)")
+@click.option("--run-id", help="Custom run ID (default: auto-generated)")
 @click.option("--parallel", "-p", default=10, help="Max parallel tasks")
 @click.option("--max-retries", default=3, help="Max retries for failed tasks")
 @click.option("--task-timeout", default=300, help="Timeout per task in seconds")
@@ -91,6 +148,7 @@ def run(
     benchmark: str | None,
     tasks_file: str | None,
     output: str,
+    run_id: str | None,
     parallel: int,
     max_retries: int,
     task_timeout: int,
@@ -108,8 +166,29 @@ def run(
     if not benchmark and not tasks_file:
         raise click.UsageError("Must specify either --benchmark or --tasks-file")
     
-    output_dir = Path(output)
+    # Determine benchmark name for folder structure
+    if benchmark:
+        bench_name = benchmark
+    elif tasks_file:
+        bench_name = Path(tasks_file).stem
+    else:
+        bench_name = "custom"
+    
+    # Generate run ID if not provided
+    if not run_id:
+        run_id = generate_run_id(
+            benchmark=bench_name,
+            agent=agent,
+            model=model,
+        )
+    
+    # Create output directory: {output}/{benchmark}/{run_id}/
+    base_output = Path(output)
+    output_dir = base_output / bench_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    click.echo(f"Run ID: {run_id}")
+    click.echo(f"Output: {output_dir}")
     
     # Set model env var if specified
     if model:
@@ -125,7 +204,6 @@ def run(
                     data = json.loads(line)
                     task_list.append(Task.from_dict(data))
         bench = None
-        bench_name = tasks_file
     else:
         from .benchmarks.registry import get_benchmark
         bench = get_benchmark(benchmark)
@@ -269,6 +347,7 @@ def run(
     from .run_metadata import aggregate_run_stats, save_run_metadata
     
     run_config = {
+        "run_id": run_id,
         "agent": agent,
         "benchmark": benchmark or tasks_file,
         "model": model,
@@ -309,7 +388,14 @@ def run(
         click.echo(f"\nUsage: {usage.total_tokens:,} tokens ({', '.join(usage_parts)})")
     
     if run_metadata.total_cost_usd > 0:
-        click.echo(f"Cost: ${run_metadata.total_cost_usd:.4f}")
+        cost = run_metadata.total_cost_usd
+        if cost < 0.0001:
+            # Show in millicents for very small costs
+            click.echo(f"Cost: ${cost:.6f} ({cost * 100000:.2f}¢ per 1000 tasks)")
+        elif cost < 0.01:
+            click.echo(f"Cost: ${cost:.4f}")
+        else:
+            click.echo(f"Cost: ${cost:.2f}")
     
     # Per-model breakdown if multiple models
     if len(run_metadata.model_stats) > 1:

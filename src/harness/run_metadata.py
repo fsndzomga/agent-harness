@@ -111,6 +111,8 @@ class TaskStats:
     cost_usd: float = 0.0
     latency_ms: float = 0.0
     error: str | None = None
+    metrics: dict | None = None  # Agent-reported KPIs for this task
+    trace: list[dict] = field(default_factory=list)  # Raw trace entries
 
 
 @dataclass
@@ -140,30 +142,37 @@ class RunMetadata:
     git_branch: str | None = None
     git_dirty: bool = False
     
-    # Results
+    # Execution results
     num_tasks_run: int = 0
-    num_tasks_success: int = 0
-    num_tasks_failed: int = 0
+    num_tasks_completed: int = 0  # Tasks that ran without crashing
+    num_tasks_errored: int = 0  # Tasks that crashed/timed out
+    completed_task_ids: list[str] = field(default_factory=list)  # Tasks that executed successfully
+    error_task_ids: list[str] = field(default_factory=list)  # Tasks that crashed/timed out
     
-    # Task lists
-    successful_task_ids: list[str] = field(default_factory=list)
-    failed_task_ids: list[str] = field(default_factory=list)
-    
-    # Grading
+    # Grading results (what most people care about)
     score: float = 0.0
     passed: int = 0
     total_graded: int = 0
+    passed_task_ids: list[str] = field(default_factory=list)  # Tasks that passed grading
+    failed_task_ids: list[str] = field(default_factory=list)  # Tasks that failed grading
     
-    # Aggregated stats
+    # Aggregated stats (total across all models)
     total_usage: UsageStats = field(default_factory=UsageStats)
     total_cost_usd: float = 0.0
     total_latency_ms: float = 0.0
     
-    # Per-model breakdown
+    # Per-model usage breakdown (simplified view)
+    usage_by_model: dict[str, dict] = field(default_factory=dict)
+    cost_by_model: dict[str, float] = field(default_factory=dict)
+    
+    # Per-model breakdown (full stats)
     model_stats: dict[str, ModelStats] = field(default_factory=dict)
     
     # Per-task stats
     task_stats: list[TaskStats] = field(default_factory=list)
+    
+    # Aggregated agent metrics (sum/avg of per-task metrics)
+    agent_metrics: dict = field(default_factory=dict)
     
     # Duration
     duration_seconds: float = 0.0
@@ -354,9 +363,10 @@ def aggregate_trace_file(trace_path: Path) -> tuple[UsageStats, float, float, st
     latency = 0.0
     model = None
     requests = 0
+    trace_entries = []
     
     if not trace_path.exists():
-        return usage, cost, latency, model, requests
+        return usage, cost, latency, model, requests, trace_entries
     
     with open(trace_path) as f:
         for line in f:
@@ -369,7 +379,10 @@ def aggregate_trace_file(trace_path: Path) -> tuple[UsageStats, float, float, st
             except json.JSONDecodeError:
                 continue
             
-            # Only process completion entries
+            # Store all trace entries
+            trace_entries.append(entry)
+            
+            # Only process completion entries for stats
             if entry.get("type") != "completion":
                 continue
             
@@ -389,7 +402,82 @@ def aggregate_trace_file(trace_path: Path) -> tuple[UsageStats, float, float, st
             # Extract latency
             latency += entry.get("latency_ms", 0) or 0
     
-    return usage, cost, latency, model, requests
+    return usage, cost, latency, model, requests, trace_entries
+
+
+def aggregate_agent_metrics(metrics_list: list[dict]) -> dict:
+    """
+    Aggregate agent-reported metrics across all tasks.
+    
+    Aggregation rules:
+    - Numeric values: sum and compute average
+    - Lists: concatenate
+    - Counters (dict with numeric values): sum per key
+    - Other: collect unique values
+    
+    Returns dict with:
+    - {metric}_total: sum of numeric values
+    - {metric}_avg: average of numeric values
+    - {metric}_count: count of tasks reporting this metric
+    - Plus any non-numeric aggregations
+    """
+    if not metrics_list:
+        return {}
+    
+    agg: dict = {}
+    counts: dict[str, int] = {}
+    
+    for metrics in metrics_list:
+        if not metrics:
+            continue
+            
+        for key, value in metrics.items():
+            if key not in counts:
+                counts[key] = 0
+            counts[key] += 1
+            
+            if isinstance(value, (int, float)):
+                # Numeric: track sum
+                sum_key = f"{key}_total"
+                agg[sum_key] = agg.get(sum_key, 0) + value
+                
+            elif isinstance(value, list):
+                # List: concatenate
+                list_key = f"{key}_all"
+                if list_key not in agg:
+                    agg[list_key] = []
+                agg[list_key].extend(value)
+                
+            elif isinstance(value, dict):
+                # Dict: assume it's counters, sum per key
+                dict_key = f"{key}_totals"
+                if dict_key not in agg:
+                    agg[dict_key] = {}
+                for k, v in value.items():
+                    if isinstance(v, (int, float)):
+                        agg[dict_key][k] = agg[dict_key].get(k, 0) + v
+                    else:
+                        # Non-numeric dict value: collect
+                        if k not in agg[dict_key]:
+                            agg[dict_key][k] = []
+                        if isinstance(agg[dict_key][k], list):
+                            agg[dict_key][k].append(v)
+            else:
+                # Other: collect unique values
+                set_key = f"{key}_values"
+                if set_key not in agg:
+                    agg[set_key] = []
+                if value not in agg[set_key]:
+                    agg[set_key].append(value)
+    
+    # Compute averages for numeric metrics
+    for key, count in counts.items():
+        sum_key = f"{key}_total"
+        if sum_key in agg:
+            agg[f"{key}_avg"] = agg[sum_key] / count
+            agg[f"{key}_count"] = count
+    
+    return agg
 
 
 def aggregate_run_stats(
@@ -412,8 +500,11 @@ def aggregate_run_stats(
     # Get git info for reproducibility
     git_info = get_git_info()
     
+    # Use provided run_id or generate one
+    run_id = config.get("run_id") or str(uuid.uuid4())[:8]
+    
     run = RunMetadata(
-        run_id=str(uuid.uuid4())[:8],
+        run_id=run_id,
         timestamp=datetime.utcnow().isoformat() + "Z",
         agent=config.get("agent", "unknown"),
         benchmark=config.get("benchmark"),
@@ -438,17 +529,20 @@ def aggregate_run_stats(
         
         run.num_tasks_run += 1
         if is_success:
-            run.num_tasks_success += 1
-            run.successful_task_ids.append(task_id)
+            run.num_tasks_completed += 1
+            run.completed_task_ids.append(task_id)
         else:
-            run.num_tasks_failed += 1
-            run.failed_task_ids.append(task_id)
+            run.num_tasks_errored += 1
+            run.error_task_ids.append(task_id)
         
-        # Find trace file
+        # Find trace file and extract stats + raw entries
         trace_path = output_dir / f"trace_{task_id}.jsonl"
-        usage, cost, latency, model, requests = aggregate_trace_file(trace_path)
+        usage, cost, latency, model, requests, trace_entries = aggregate_trace_file(trace_path)
         
-        # Task stats
+        # Get agent-reported metrics for this task
+        task_metrics = getattr(result, 'metrics', None)
+        
+        # Task stats (includes full trace)
         task_stat = TaskStats(
             task_id=task_id,
             status=result.status,
@@ -457,6 +551,8 @@ def aggregate_run_stats(
             cost_usd=cost,
             latency_ms=latency,
             error=getattr(result, 'error', None),
+            metrics=task_metrics,
+            trace=trace_entries,
         )
         run.task_stats.append(task_stat)
         
@@ -485,12 +581,29 @@ def aggregate_run_stats(
     
     run.model_stats = model_stats
     
+    # Build simplified per-model views
+    for model_name, ms in model_stats.items():
+        run.usage_by_model[model_name] = {
+            "prompt_tokens": ms.usage.prompt_tokens,
+            "completion_tokens": ms.usage.completion_tokens,
+            "total_tokens": ms.usage.total_tokens,
+        }
+        run.cost_by_model[model_name] = ms.cost_usd
+    
     # Aggregate grading results
     if grade_results:
         run.total_graded = len(grade_results)
-        run.passed = sum(1 for g in grade_results if g.passed)
+        for g in grade_results:
+            if g.passed:
+                run.passed += 1
+                run.passed_task_ids.append(g.task_id)
+            else:
+                run.failed_task_ids.append(g.task_id)
         if run.total_graded > 0:
             run.score = 100 * run.passed / run.total_graded
+    
+    # Aggregate agent metrics across all tasks
+    run.agent_metrics = aggregate_agent_metrics([t.metrics for t in run.task_stats if t.metrics])
     
     return run
 

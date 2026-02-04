@@ -35,6 +35,7 @@ class Submission:
     task_id: str
     answer: str
     trace: list[dict] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)  # Agent-reported KPIs
     
     @classmethod
     def from_jsonrpc(cls, line: str) -> "Submission":
@@ -48,4 +49,5 @@ class Submission:
             task_id=result["task_id"],
             answer=result["submission"],
             trace=result.get("trace", []),
+            metrics=result.get("metrics", {}),
         )

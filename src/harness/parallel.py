@@ -39,6 +39,7 @@ class TaskResult:
     attempts: int = 1
     duration_ms: int = 0
     trace_file: str | None = None
+    metrics: dict | None = None  # Agent-reported KPIs
 
 
 def classify_error(error: Exception) -> tuple[ErrorType, float | None]:
@@ -188,6 +189,7 @@ class ParallelRunner:
                     attempts=attempt,
                     duration_ms=duration_ms,
                     trace_file=str(self.output_dir / f"trace_{task.id}.jsonl"),
+                    metrics=submission.metrics if submission.metrics else None,
                 )
                 
             except Exception as e:
