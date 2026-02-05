@@ -818,5 +818,132 @@ def continue_run(
         click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored)}")
 
 
+DEFAULT_HF_REPO = "fsndzomga/agent-harness-runs"
+
+
+@cli.command("push")
+@click.argument("run_id")
+@click.option("--repo", "-r", default=DEFAULT_HF_REPO, show_default=True, help="HuggingFace dataset repo ID")
+@click.option("--output", "-o", type=click.Path(), default="./results", help="Base results directory (default: ./results)")
+@click.option("--private", is_flag=True, help="Create repo as private if it doesn't exist")
+@click.option("--token", envvar="HF_TOKEN", help="HuggingFace API token (default: HF_TOKEN env var)")
+def push(run_id: str, repo: str, output: str, private: bool, token: str | None):
+    """Push a run to HuggingFace dataset repo.
+
+    Uploads run.json as {run_id}.json to the canonical dataset repo.
+    Default repo: fsndzomga/agent-harness-runs
+
+    \b
+    Examples:
+        harness push my-run-id
+        harness push ./results/arithmetic/my-run/
+        harness push 5d8519 --private
+    """
+    from .hf_integration import push_run
+
+    results_base = Path(output)
+    run_dir = find_run_dir(run_id, results_base)
+    if run_dir is None:
+        click.echo(f"Could not find run directory for '{run_id}' under {results_base}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Pushing {run_dir} to {repo}...")
+
+    try:
+        result = push_run(
+            run_dir=run_dir,
+            repo_id=repo,
+            token=token,
+            private=private,
+        )
+        click.echo(f"Pushed run '{result['run_id']}' to {result['repo_url']}")
+        click.echo(f"File: {result['file_url']}")
+    except ImportError as e:
+        click.echo(f"Missing dependency: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Push failed: {e}", err=True)
+        raise SystemExit(1)
+
+
+@cli.command("pull")
+@click.argument("run_id")
+@click.option("--repo", "-r", default=DEFAULT_HF_REPO, show_default=True, help="HuggingFace dataset repo ID")
+@click.option("--output", "-o", type=click.Path(), default=".", help="Output directory (default: current dir)")
+@click.option("--token", envvar="HF_TOKEN", help="HuggingFace API token")
+def pull(run_id: str, repo: str, output: str, token: str | None):
+    """Pull a run.json from HuggingFace dataset repo.
+
+    \b
+    Examples:
+        harness pull my-run-id
+        harness pull my-run-id -o ./downloads
+    """
+    from .hf_integration import pull_run
+
+    click.echo(f"Downloading run '{run_id}' from {repo}...")
+
+    try:
+        path = pull_run(
+            run_id=run_id,
+            repo_id=repo,
+            output_dir=Path(output),
+            token=token,
+        )
+        click.echo(f"Downloaded: {path}")
+    except ImportError as e:
+        click.echo(f"Missing dependency: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Pull failed: {e}", err=True)
+        raise SystemExit(1)
+
+
+@cli.command("runs")
+@click.option("--repo", "-r", default=DEFAULT_HF_REPO, show_default=True, help="HuggingFace dataset repo ID")
+@click.option("--token", envvar="HF_TOKEN", help="HuggingFace API token")
+@click.option("--json-output", "json_out", is_flag=True, help="Output as JSON")
+def list_remote_runs(repo: str, token: str | None, json_out: bool):
+    """List runs stored in a HuggingFace dataset repo.
+
+    \b
+    Examples:
+        harness runs
+        harness runs --json-output
+    """
+    from .hf_integration import list_runs
+
+    try:
+        runs = list_runs(repo_id=repo, token=token)
+    except ImportError as e:
+        click.echo(f"Missing dependency: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Failed to list runs: {e}", err=True)
+        raise SystemExit(1)
+
+    if not runs:
+        click.echo("No runs found.")
+        return
+
+    if json_out:
+        click.echo(json.dumps(runs, indent=2))
+        return
+
+    # Table display
+    click.echo(f"{'Run ID':<45} {'Benchmark':<15} {'Model':<25} {'Score':>6} {'Tasks':>5} {'Cost':>10}")
+    click.echo("─" * 110)
+    for r in runs:
+        run_id = r.get("run_id", "?")[:44]
+        bench = (r.get("benchmark") or "?")[:14]
+        model = (r.get("model") or "?")[:24]
+        score = r.get("score", 0)
+        tasks = r.get("num_tasks_run", 0)
+        cost = r.get("total_cost_usd", 0)
+        click.echo(f"{run_id:<45} {bench:<15} {model:<25} {score:>5.1f}% {tasks:>5} ${cost:>8.4f}")
+
+    click.echo(f"\n{len(runs)} run(s) in {repo}")
+
+
 if __name__ == "__main__":
     cli()
