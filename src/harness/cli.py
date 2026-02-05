@@ -458,5 +458,365 @@ def view(path: str):
                 click.echo(f"  ... and {len(failures) - 10} more")
 
 
+def find_run_dir(run_id: str, results_base: Path) -> Path | None:
+    """
+    Find the run directory for a given run_id.
+    
+    Searches for:
+    1. Exact match: {results_base}/*/{run_id}/run.json
+    2. Prefix match: {results_base}/*/*{run_id}*/run.json
+    3. Direct path if run_id is a path
+    """
+    run_id_path = Path(run_id)
+    
+    # If run_id is a direct path to a directory with run.json
+    if run_id_path.is_dir() and (run_id_path / "run.json").exists():
+        return run_id_path
+    
+    # Search under results_base
+    if not results_base.is_dir():
+        return None
+    
+    matches = []
+    for benchmark_dir in results_base.iterdir():
+        if not benchmark_dir.is_dir():
+            continue
+        for run_dir in benchmark_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            if run_dir.name == run_id and (run_dir / "run.json").exists():
+                return run_dir  # Exact match
+            if run_id in run_dir.name and (run_dir / "run.json").exists():
+                matches.append(run_dir)
+    
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        # Return the most recent (by directory name, which includes timestamp)
+        return sorted(matches, key=lambda p: p.name)[-1]
+    
+    return None
+
+
+@cli.command("continue")
+@click.argument("run_id")
+@click.option("--output", "-o", type=click.Path(), default="./results", help="Base results directory (default: ./results)")
+@click.option("--parallel", "-p", type=int, help="Override parallel workers")
+@click.option("--max-retries", type=int, help="Override max retries")
+@click.option("--task-timeout", type=int, help="Override task timeout")
+def continue_run(
+    run_id: str,
+    output: str,
+    parallel: int | None,
+    max_retries: int | None,
+    task_timeout: int | None,
+):
+    """Continue a failed run by re-running errored tasks.
+    
+    Reads run.json from a previous run, re-runs tasks that errored during
+    execution, and updates all output files (traces, grades, summary, run.json).
+    
+    RUN_ID can be a run ID, a partial match, or a direct path to a run directory.
+    
+    \b
+    Examples:
+        harness continue arithmetic_echo-agent_20260204_225130_5d8519
+        harness continue 5d8519
+        harness continue ./results/arithmetic/my-run/
+    """
+    import asyncio
+    import os
+    import sys
+
+    from .parallel import ParallelRunner, RetryConfig
+
+    results_base = Path(output)
+
+    # Find the run directory
+    run_dir = find_run_dir(run_id, results_base)
+    if run_dir is None:
+        click.echo(f"Could not find run directory for '{run_id}' under {results_base}", err=True)
+        raise SystemExit(1)
+
+    # Load run.json
+    run_json_path = run_dir / "run.json"
+    run_data = json.loads(run_json_path.read_text())
+    click.echo(f"Found run: {run_dir}")
+
+    # Get error task IDs (handle both old and new field names)
+    error_task_ids = run_data.get("error_task_ids", [])
+    if not error_task_ids:
+        # Backward compat: old format stored execution failures in failed_task_ids
+        # but only if there's no separate error_task_ids field
+        if "error_task_ids" not in run_data:
+            error_task_ids = run_data.get("failed_task_ids", [])
+
+    if not error_task_ids:
+        click.echo("No errored tasks to re-run. Run completed successfully!")
+        return
+
+    click.echo(f"Re-running {len(error_task_ids)} errored task(s): {', '.join(error_task_ids)}")
+
+    # Extract config from previous run
+    agent = run_data.get("agent")
+    benchmark_name = run_data.get("benchmark")
+    model = run_data.get("model")
+    grader = run_data.get("grader", "default")
+    grader_model = run_data.get("grader_model")
+    prev_parallel = run_data.get("parallel", 10)
+    prev_max_retries = run_data.get("max_retries", 3)
+    prev_task_timeout = run_data.get("task_timeout", 300)
+
+    # Allow CLI overrides
+    eff_parallel = parallel if parallel is not None else prev_parallel
+    eff_max_retries = max_retries if max_retries is not None else prev_max_retries
+    eff_task_timeout = task_timeout if task_timeout is not None else prev_task_timeout
+
+    # Validate agent path
+    agent_path = Path(agent)
+    if not agent_path.exists():
+        click.echo(f"Agent not found: {agent}", err=True)
+        raise SystemExit(1)
+
+    # Set model env var if specified
+    if model:
+        os.environ["HARNESS_MODEL"] = model
+
+    # Load tasks from benchmark or tasks-file
+    if benchmark_name:
+        from .benchmarks.registry import get_benchmark
+        bench = get_benchmark(benchmark_name)
+        all_tasks = bench.get_tasks()
+    else:
+        click.echo("Cannot continue: no benchmark specified in original run", err=True)
+        raise SystemExit(1)
+
+    # Filter to only the errored tasks
+    error_task_set = set(error_task_ids)
+    retry_tasks = [t for t in all_tasks if t.id in error_task_set]
+
+    if not retry_tasks:
+        click.echo(f"Could not find matching tasks in benchmark '{benchmark_name}' for IDs: {error_task_ids}", err=True)
+        raise SystemExit(1)
+
+    found_ids = {t.id for t in retry_tasks}
+    missing_ids = error_task_set - found_ids
+    if missing_ids:
+        click.echo(f"Warning: Could not find tasks for IDs: {', '.join(sorted(missing_ids))}")
+
+    click.echo(f"Parallel: {eff_parallel}, Retries: {eff_max_retries}, Timeout: {eff_task_timeout}s")
+
+    # Delete old trace files for errored tasks (they'll be regenerated)
+    for task_id in error_task_ids:
+        old_trace = run_dir / f"trace_{task_id}.jsonl"
+        if old_trace.exists():
+            old_trace.unlink()
+
+    # Prepare agent env
+    agent_env = {}
+    if model:
+        agent_env["HARNESS_MODEL"] = model
+
+    # Run the errored tasks
+    runner = ParallelRunner(
+        agent_path=agent_path,
+        output_dir=run_dir,
+        max_parallel=eff_parallel,
+        retry_config=RetryConfig(max_retries=eff_max_retries),
+        task_timeout=eff_task_timeout,
+        agent_env=agent_env,
+    )
+
+    async def run_with_progress():
+        results = []
+        async for result in runner.run_streaming(retry_tasks):
+            results.append(result)
+        return results
+
+    new_results = asyncio.run(run_with_progress())
+
+    # Report on retry results
+    new_success = sum(1 for r in new_results if r.status == "success")
+    new_failed = len(new_results) - new_success
+    click.echo(f"\nRetry results: {new_success}/{len(new_results)} succeeded, {new_failed} failed")
+
+    # Load existing summary to get old successful results
+    old_summary_path = run_dir / "summary.json"
+    old_results_data = []
+    if old_summary_path.exists():
+        old_summary = json.loads(old_summary_path.read_text())
+        old_results_data = old_summary.get("results", [])
+
+    # Merge: keep old successful results, replace errored ones with new results
+    merged_results_data = []
+    for old_r in old_results_data:
+        if old_r["task_id"] not in error_task_set:
+            merged_results_data.append(old_r)
+
+    # Add new retry results
+    for r in new_results:
+        merged_results_data.append({
+            "task_id": r.task_id,
+            "status": r.status,
+            "submission": r.submission,
+            "error": r.error,
+            "attempts": r.attempts,
+            "duration_ms": r.duration_ms,
+        })
+
+    # Total counts across merged results
+    total_success = sum(1 for r in merged_results_data if r["status"] == "success")
+    total_failed = len(merged_results_data) - total_success
+
+    # Grade all submissions (not just the retried ones)
+    grade_results = None
+    if benchmark_name and bench and hasattr(bench, 'grade'):
+        click.echo(f"\nGrading with '{grader}' grader...")
+
+        from .benchmarks.graders import (
+            get_grader_preset,
+            grade_with_pipeline,
+            grade_with_llm_fallback,
+            LLMJudge,
+        )
+        from .benchmarks.base import GradeResult
+
+        grade_results = []
+        submissions = [
+            {"task_id": r["task_id"], "submission": r["submission"]}
+            for r in merged_results_data
+            if r.get("submission") is not None
+        ]
+
+        task_data_map = {t.id: t.data for t in all_tasks}
+
+        for sub in submissions:
+            task_id = sub["task_id"]
+            submission = sub["submission"]
+            expected = bench._answers.get(task_id, "")
+            question = task_data_map.get(task_id, {}).get("question", "")
+
+            if grader == "llm":
+                judge = LLMJudge(model=grader_model or model)
+                passed, method, _ = judge.grade(submission, expected, question)
+            elif grader == "llm-fallback":
+                passed, method = grade_with_llm_fallback(
+                    submission, expected, question,
+                    llm_model=grader_model or model,
+                )
+            else:
+                graders_list = get_grader_preset(grader)
+                passed, method = grade_with_pipeline(submission, expected, graders_list)
+
+            grade_results.append(GradeResult(
+                task_id=task_id,
+                passed=passed,
+                score=1.0 if passed else 0.0,
+                expected=expected,
+                actual=submission,
+                method=method,
+            ))
+
+        g_passed = sum(1 for g in grade_results if g.passed)
+        g_total = len(grade_results)
+        g_score = (100 * g_passed / g_total) if g_total > 0 else 0
+        click.echo(f"Score: {g_passed}/{g_total} ({g_score:.1f}%)")
+
+        # Save grades
+        grades_path = run_dir / "grades.json"
+        grades_path.write_text(json.dumps([
+            {
+                "task_id": g.task_id,
+                "passed": g.passed,
+                "score": g.score,
+                "expected": g.expected,
+                "actual": g.actual,
+                "method": g.method,
+            }
+            for g in grade_results
+        ], indent=2))
+        click.echo(f"Grades: {grades_path}")
+
+    # Save updated summary
+    summary = {
+        "benchmark": benchmark_name,
+        "model": model,
+        "total": len(merged_results_data),
+        "success": total_success,
+        "failed": total_failed,
+        "results": merged_results_data,
+    }
+    summary_path = run_dir / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    click.echo(f"Summary: {summary_path}")
+
+    # Rebuild run.json from all trace files
+    from .run_metadata import aggregate_run_stats, save_run_metadata
+    from .parallel import TaskResult
+
+    # Reconstruct TaskResult objects from merged summary data
+    all_task_results = []
+    for r in merged_results_data:
+        all_task_results.append(TaskResult(
+            task_id=r["task_id"],
+            status=r["status"],
+            submission=r.get("submission"),
+            error=r.get("error"),
+            attempts=r.get("attempts", 1),
+            duration_ms=r.get("duration_ms", 0),
+        ))
+
+    run_config = {
+        "run_id": run_data["run_id"],
+        "agent": agent,
+        "benchmark": benchmark_name,
+        "model": model,
+        "grader": grader,
+        "parallel": eff_parallel,
+        "max_retries": eff_max_retries,
+        "task_timeout": eff_task_timeout,
+        "num_tasks": run_data.get("num_tasks_requested"),
+        "run_command": f"harness continue {run_id} (original: {run_data.get('run_command', 'N/A')})",
+    }
+
+    run_metadata = aggregate_run_stats(
+        output_dir=run_dir,
+        results=all_task_results,
+        grade_results=grade_results,
+        config=run_config,
+    )
+    run_metadata.duration_seconds = sum(r.get("duration_ms", 0) for r in merged_results_data) / 1000
+
+    run_path = save_run_metadata(run_metadata, run_dir)
+    click.echo(f"Run: {run_path}")
+
+    # Print usage summary
+    usage = run_metadata.total_usage
+    if usage.total_tokens > 0:
+        usage_parts = [
+            f"{usage.prompt_tokens:,} prompt",
+            f"{usage.completion_tokens:,} completion",
+        ]
+        if usage.reasoning_tokens:
+            usage_parts.append(f"{usage.reasoning_tokens:,} reasoning")
+        if usage.cached_tokens:
+            usage_parts.append(f"{usage.cached_tokens:,} cached")
+        click.echo(f"\nUsage: {usage.total_tokens:,} tokens ({', '.join(usage_parts)})")
+
+    if run_metadata.total_cost_usd > 0:
+        cost = run_metadata.total_cost_usd
+        if cost < 0.01:
+            click.echo(f"Cost: ${cost:.4f}")
+        else:
+            click.echo(f"Cost: ${cost:.2f}")
+
+    # Final status
+    if new_failed == 0:
+        click.echo(f"\nAll {len(error_task_ids)} previously errored tasks now succeeded!")
+    else:
+        still_errored = [r.task_id for r in new_results if r.status != "success"]
+        click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored)}")
+
+
 if __name__ == "__main__":
     cli()

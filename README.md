@@ -510,7 +510,7 @@ poetry run harness run-one \
 
 ### Next Up
 
-- [ ] **Continue run**: `harness continue <run_id>` - Re-run `error_task_ids` from a failed run, update traces and all JSON files
+- [x] **Continue run**: `harness continue <run_id>` - Re-run `error_task_ids` from a failed run, update traces and all JSON files
 - [ ] **HuggingFace integration**: Create HF dataset repo to store `run.json` files
 - [ ] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
 - [ ] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
