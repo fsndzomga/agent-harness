@@ -156,6 +156,14 @@ class AgentRunner:
                     self.logger.log("agent_stdout", content=line)
                 continue
             
+            # Only process dict messages (JSON-RPC). Agents may print
+            # bare JSON primitives (numbers, strings) via stdout — treat
+            # those the same as non-JSON lines.
+            if not isinstance(msg, dict):
+                if self.logger:
+                    self.logger.log("agent_stdout", content=line)
+                continue
+            
             # Agent logging (completions, tool calls, etc.)
             if msg.get("method") == "log":
                 if self.logger:
