@@ -1,6 +1,7 @@
 """Parallel task runner with retry logic."""
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -106,6 +107,12 @@ class ParallelRunner:
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Real-time status file — append-only for crash safety.
+        # Each line records one task completion/failure so that
+        # interrupted runs can be continued without run.json.
+        self._status_path = self.output_dir / "status.jsonl"
+        self._status_lock = asyncio.Lock()
+        
         # Progress tracking
         self._completed = 0
         self._failed = 0
@@ -182,7 +189,7 @@ class ParallelRunner:
                 self._completed += 1
                 self._print_progress(task.id, "✓", attempt)
                 
-                return TaskResult(
+                result = TaskResult(
                     task_id=task.id,
                     status="success",
                     submission=submission.answer,
@@ -191,6 +198,8 @@ class ParallelRunner:
                     trace_file=str(self.output_dir / f"trace_{task.id}.jsonl"),
                     metrics=submission.metrics if submission.metrics else None,
                 )
+                self._write_status(result)
+                return result
                 
             except Exception as e:
                 last_error = str(e)
@@ -202,7 +211,7 @@ class ParallelRunner:
                     self._failed += 1
                     self._print_progress(task.id, "✗", attempt, last_error)
                     
-                    return TaskResult(
+                    result = TaskResult(
                         task_id=task.id,
                         status="failed",
                         error=last_error,
@@ -210,6 +219,8 @@ class ParallelRunner:
                         attempts=attempt,
                         duration_ms=int((time.monotonic() - total_start) * 1000),
                     )
+                    self._write_status(result)
+                    return result
                 
                 # Calculate backoff delay
                 if delay_hint is not None:
@@ -232,7 +243,7 @@ class ParallelRunner:
         self._failed += 1
         self._print_progress(task.id, "✗", cfg.max_retries, last_error)
         
-        return TaskResult(
+        result = TaskResult(
             task_id=task.id,
             status="failed",
             error=f"Failed after {cfg.max_retries} attempts: {last_error}",
@@ -240,6 +251,8 @@ class ParallelRunner:
             attempts=cfg.max_retries,
             duration_ms=int((time.monotonic() - total_start) * 1000),
         )
+        self._write_status(result)
+        return result
     
     async def _run_task_async(self, task: Task) -> Submission:
         """Run task in executor (subprocess is blocking)."""
@@ -261,6 +274,29 @@ class ParallelRunner:
         finally:
             logger.close()
     
+    def _write_status(self, result: TaskResult) -> None:
+        """Append a task result to status.jsonl (crash-safe, append-only)."""
+        entry = {
+            "task_id": result.task_id,
+            "status": result.status,
+            "timestamp": time.time(),
+        }
+        if result.submission is not None:
+            entry["submission"] = result.submission
+        if result.error:
+            entry["error"] = result.error
+        if result.attempts:
+            entry["attempts"] = result.attempts
+        if result.duration_ms:
+            entry["duration_ms"] = result.duration_ms
+        if result.metrics:
+            entry["metrics"] = result.metrics
+
+        line = json.dumps(entry, separators=(",", ":")) + "\n"
+        with open(self._status_path, "a") as f:
+            f.write(line)
+            f.flush()
+
     def _print_progress(self, task_id: str, symbol: str, attempt: int, msg: str = ""):
         """Print progress to console."""
         done = self._completed + self._failed

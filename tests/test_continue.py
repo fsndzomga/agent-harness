@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from harness.cli import cli, find_run_dir
+from harness.cli import cli, find_run_dir, load_status_file, recover_run_state
 
 
 # Path to the echo agent for integration tests
@@ -97,7 +97,7 @@ class TestContinueNoErrors:
         runner = CliRunner()
         result = runner.invoke(cli, ["continue", "test-run", "-o", str(tmp_path)])
         assert result.exit_code == 0
-        assert "No errored tasks" in result.output
+        assert "No errored or incomplete tasks" in result.output
 
 
 class TestContinueValidation:
@@ -249,7 +249,7 @@ class TestContinueIntegration:
         ])
 
         assert result.exit_code == 0, f"Failed with output:\n{result.output}"
-        assert "Re-running 1 errored task" in result.output
+        assert "Re-running 1 task" in result.output
 
         # Verify run.json was updated
         run_data = json.loads((run_dir / "run.json").read_text())
@@ -342,7 +342,7 @@ class TestContinueIntegration:
         ])
 
         assert result.exit_code == 0, f"Failed with output:\n{result.output}"
-        assert "Re-running 1 errored task" in result.output
+        assert "Re-running 1 task" in result.output
 
     def test_continue_with_overrides(self, tmp_path):
         """CLI overrides for parallel, max-retries, task-timeout are applied."""
@@ -404,4 +404,365 @@ class TestContinueIntegration:
         ])
 
         assert result.exit_code == 0, f"Failed with output:\n{result.output}"
-        assert "Re-running 1 errored task" in result.output
+        assert "Re-running 1 task" in result.output
+
+
+# =========================================================================
+# Tests for status.jsonl, run_config.json, and interrupted run recovery
+# =========================================================================
+
+
+class TestLoadStatusFile:
+    """Test load_status_file helper."""
+
+    def test_empty_file(self, tmp_path):
+        """Returns empty dict for empty file."""
+        status_path = tmp_path / "status.jsonl"
+        status_path.write_text("")
+        assert load_status_file(status_path) == {}
+
+    def test_missing_file(self, tmp_path):
+        """Returns empty dict for missing file."""
+        assert load_status_file(tmp_path / "status.jsonl") == {}
+
+    def test_parses_entries(self, tmp_path):
+        """Correctly parses JSONL entries."""
+        status_path = tmp_path / "status.jsonl"
+        status_path.write_text(
+            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+            + json.dumps({"task_id": "t2", "status": "failed", "error": "timeout"}) + "\n"
+        )
+        result = load_status_file(status_path)
+        assert len(result) == 2
+        assert result["t1"]["status"] == "success"
+        assert result["t2"]["status"] == "failed"
+
+    def test_last_entry_wins(self, tmp_path):
+        """When a task appears multiple times, last entry wins."""
+        status_path = tmp_path / "status.jsonl"
+        status_path.write_text(
+            json.dumps({"task_id": "t1", "status": "failed", "error": "timeout"}) + "\n"
+            + json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+        )
+        result = load_status_file(status_path)
+        assert result["t1"]["status"] == "success"
+
+    def test_skips_bad_lines(self, tmp_path):
+        """Malformed lines are silently skipped."""
+        status_path = tmp_path / "status.jsonl"
+        status_path.write_text(
+            "not json\n"
+            + json.dumps({"task_id": "t1", "status": "success"}) + "\n"
+            + "{bad json\n"
+        )
+        result = load_status_file(status_path)
+        assert len(result) == 1
+        assert "t1" in result
+
+
+class TestRecoverRunState:
+    """Test recover_run_state helper."""
+
+    def test_from_run_json(self, tmp_path):
+        """Recovers state from run.json (completed run)."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({
+            "run_id": "run1",
+            "agent": "my-agent",
+            "benchmark": "arithmetic",
+            "error_task_ids": ["t2"],
+            "completed_task_ids": ["t1"],
+        }))
+        state = recover_run_state(run_dir)
+        assert state["run_id"] == "run1"
+        assert state["error_task_ids"] == ["t2"]
+        assert state["completed_task_ids"] == ["t1"]
+        assert state["incomplete_task_ids"] == []
+
+    def test_from_run_json_old_format(self, tmp_path):
+        """Recovers state from old run.json with failed_task_ids."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        (run_dir / "run.json").write_text(json.dumps({
+            "run_id": "run1",
+            "agent": "my-agent",
+            "benchmark": "arithmetic",
+            "failed_task_ids": ["t2"],
+            "completed_task_ids": ["t1"],
+        }))
+        state = recover_run_state(run_dir)
+        assert state["error_task_ids"] == ["t2"]
+
+    def test_from_config_and_status(self, tmp_path):
+        """Recovers state from run_config.json + status.jsonl."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        (run_dir / "run_config.json").write_text(json.dumps({
+            "run_id": "run1",
+            "agent": "my-agent",
+            "benchmark": "gaia",
+            "model": "deepseek",
+            "task_ids": ["t1", "t2", "t3"],
+        }))
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+            + json.dumps({"task_id": "t2", "status": "failed", "error": "crash"}) + "\n"
+        )
+        state = recover_run_state(run_dir)
+        assert state["run_id"] == "run1"
+        assert state["benchmark"] == "gaia"
+        assert state["completed_task_ids"] == ["t1"]
+        assert state["error_task_ids"] == ["t2"]
+        assert state["incomplete_task_ids"] == ["t3"]
+
+    def test_from_status_only(self, tmp_path):
+        """Recovers from status.jsonl even without run_config.json."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+        )
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == ["t1"]
+        assert state["incomplete_task_ids"] == []
+
+    def test_discovers_tasks_from_traces(self, tmp_path):
+        """Finds tasks that have trace files but no status entry."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        (run_dir / "run_config.json").write_text(json.dumps({
+            "run_id": "run1",
+            "agent": "my-agent",
+            "benchmark": "gaia",
+            "task_ids": ["t1", "t2", "t3"],
+        }))
+        # Only t1 succeeded
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+        )
+        # t2 has a trace file (was in-progress) but no status entry
+        (run_dir / "trace_t2.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "t2"}) + "\n"
+        )
+        # t3 has an empty trace file
+        (run_dir / "trace_t3.jsonl").write_text("")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == ["t1"]
+        assert sorted(state["incomplete_task_ids"]) == ["t2", "t3"]
+
+    def test_empty_dir(self, tmp_path):
+        """Handles a directory with nothing useful."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == []
+        assert state["error_task_ids"] == []
+        assert state["incomplete_task_ids"] == []
+
+
+class TestFindRunDirEnhanced:
+    """Test find_run_dir with status.jsonl and run_config.json."""
+
+    def test_finds_dir_with_status_jsonl(self, tmp_path):
+        """Find run dir that only has status.jsonl (no run.json)."""
+        run_dir = tmp_path / "gaia" / "gaia-run-123"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "t1", "status": "success"}) + "\n"
+        )
+        result = find_run_dir("gaia-run-123", tmp_path)
+        assert result == run_dir
+
+    def test_finds_dir_with_run_config(self, tmp_path):
+        """Find run dir that only has run_config.json."""
+        run_dir = tmp_path / "gaia" / "gaia-run-456"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_config.json").write_text("{}")
+        result = find_run_dir("gaia-run-456", tmp_path)
+        assert result == run_dir
+
+    def test_partial_match_status_only(self, tmp_path):
+        """Partial match works with status.jsonl only."""
+        run_dir = tmp_path / "gaia" / "gaia_agent_20260206_abc123"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.jsonl").write_text("")
+        result = find_run_dir("abc123", tmp_path)
+        assert result == run_dir
+
+    def test_direct_path_status_only(self, tmp_path):
+        """Direct path works with status.jsonl only."""
+        run_dir = tmp_path / "my-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.jsonl").write_text("")
+        result = find_run_dir(str(run_dir), tmp_path)
+        assert result == run_dir
+
+    def test_dir_without_any_marker_not_found(self, tmp_path):
+        """Dir without run.json, run_config.json, or status.jsonl is not found."""
+        run_dir = tmp_path / "gaia" / "gaia-run-789"
+        run_dir.mkdir(parents=True)
+        (run_dir / "trace_t1.jsonl").write_text("")  # Only trace files
+        result = find_run_dir("gaia-run-789", tmp_path)
+        assert result is None
+
+
+class TestStatusFileWriting:
+    """Test that ParallelRunner writes status.jsonl."""
+
+    def test_status_written_on_success(self, tmp_path):
+        """status.jsonl entry is created when a task succeeds."""
+        from harness.parallel import ParallelRunner, RetryConfig
+
+        runner = ParallelRunner(
+            agent_path=Path(ECHO_AGENT),
+            output_dir=tmp_path,
+            max_parallel=1,
+            retry_config=RetryConfig(max_retries=1),
+            task_timeout=30,
+        )
+
+        from harness.protocol import Task
+        import asyncio
+
+        task = Task(id="test_task", data={"question": "2+2"})
+        results = asyncio.run(runner.run_all([task]))
+
+        assert len(results) == 1
+        assert results[0].status == "success"
+
+        # Check status.jsonl was written
+        status_path = tmp_path / "status.jsonl"
+        assert status_path.exists()
+        status_map = load_status_file(status_path)
+        assert "test_task" in status_map
+        assert status_map["test_task"]["status"] == "success"
+        assert "timestamp" in status_map["test_task"]
+
+    def test_status_written_on_failure(self, tmp_path):
+        """status.jsonl entry is created when a task fails."""
+        from harness.parallel import ParallelRunner, RetryConfig, TaskResult
+
+        runner = ParallelRunner(
+            agent_path=Path("/nonexistent/agent.py"),
+            output_dir=tmp_path,
+            max_parallel=1,
+            retry_config=RetryConfig(max_retries=1),
+            task_timeout=5,
+        )
+
+        from harness.protocol import Task
+        import asyncio
+
+        task = Task(id="fail_task", data={"question": "test"})
+        results = asyncio.run(runner.run_all([task]))
+
+        assert len(results) == 1
+        assert results[0].status == "failed"
+
+        status_path = tmp_path / "status.jsonl"
+        assert status_path.exists()
+        status_map = load_status_file(status_path)
+        assert "fail_task" in status_map
+        assert status_map["fail_task"]["status"] == "failed"
+
+
+class TestContinueInterruptedRun:
+    """Integration tests for continuing interrupted runs (no run.json)."""
+
+    def _create_interrupted_run(self, base_dir: Path) -> Path:
+        """Create a fake interrupted run with run_config.json and partial status.jsonl."""
+        run_dir = base_dir / "arithmetic" / "test-interrupted-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write run_config (saved at start of run)
+        (run_dir / "run_config.json").write_text(json.dumps({
+            "run_id": "test-interrupted-run",
+            "agent": ECHO_AGENT,
+            "benchmark": "arithmetic",
+            "model": None,
+            "parallel": 2,
+            "max_retries": 1,
+            "task_timeout": 30,
+            "total_tasks": 5,
+            "task_ids": ["arith_000", "arith_001", "arith_002", "arith_003", "arith_004"],
+        }))
+
+        # Only 2 out of 5 tasks completed before kill
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "arith_000", "status": "success", "submission": "42", "attempts": 1, "duration_ms": 100}) + "\n"
+            + json.dumps({"task_id": "arith_001", "status": "success", "submission": "42", "attempts": 1, "duration_ms": 150}) + "\n"
+        )
+
+        # Trace files for completed tasks
+        for tid in ["arith_000", "arith_001"]:
+            (run_dir / f"trace_{tid}.jsonl").write_text(
+                json.dumps({"type": "task_complete", "task_id": tid}) + "\n"
+            )
+        # In-progress trace (started but not finished)
+        (run_dir / "trace_arith_002.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "arith_002"}) + "\n"
+        )
+        # Empty trace (created but process killed immediately)
+        (run_dir / "trace_arith_003.jsonl").write_text("")
+
+        return run_dir
+
+    def test_continue_interrupted_run(self, tmp_path):
+        """Continue picks up 3 incomplete tasks from an interrupted run."""
+        run_dir = self._create_interrupted_run(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", "test-interrupted-run",
+            "-o", str(tmp_path),
+        ])
+
+        assert result.exit_code == 0, f"Failed with output:\n{result.output}"
+        assert "Completed: 2" in result.output
+        assert "Incomplete: 3" in result.output
+        assert "Re-running 3 task" in result.output
+
+        # run.json should now exist
+        assert (run_dir / "run.json").exists()
+
+        # summary.json should have all 5 tasks
+        summary = json.loads((run_dir / "summary.json").read_text())
+        assert summary["total"] == 5
+        assert summary["success"] == 5  # echo agent succeeds on everything
+
+    def test_continue_interrupted_preserves_completed(self, tmp_path):
+        """Previously completed tasks are not re-run."""
+        run_dir = self._create_interrupted_run(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", "test-interrupted-run",
+            "-o", str(tmp_path),
+        ])
+
+        assert result.exit_code == 0, f"Failed with output:\n{result.output}"
+
+        # The original completed tasks should still have their original traces
+        # (not overwritten by re-running)
+        summary = json.loads((run_dir / "summary.json").read_text())
+        completed_ids = {r["task_id"] for r in summary["results"] if r["status"] == "success"}
+        assert "arith_000" in completed_ids
+        assert "arith_001" in completed_ids
+
+    def test_continue_interrupted_run_overrides(self, tmp_path):
+        """CLI overrides work for interrupted runs."""
+        run_dir = self._create_interrupted_run(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", "test-interrupted-run",
+            "-o", str(tmp_path),
+            "-p", "10",
+            "--task-timeout", "60",
+        ])
+
+        assert result.exit_code == 0, f"Failed with output:\n{result.output}"
+        assert "Parallel: 10" in result.output
+        assert "Timeout: 60s" in result.output

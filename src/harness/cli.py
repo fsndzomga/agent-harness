@@ -254,6 +254,22 @@ def run(
     if model:
         agent_env["HARNESS_MODEL"] = model
     
+    # Write run config up front — enables continue on interrupted runs
+    run_config_path = output_dir / "run_config.json"
+    run_config_path.write_text(json.dumps({
+        "run_id": run_id,
+        "agent": agent,
+        "benchmark": benchmark or tasks_file,
+        "model": model,
+        "grader": grader,
+        "parallel": parallel,
+        "max_retries": max_retries,
+        "task_timeout": task_timeout,
+        "num_tasks": num_tasks,
+        "total_tasks": len(task_list),
+        "task_ids": [t.id for t in task_list],
+    }, indent=2))
+    
     # Run
     runner = ParallelRunner(
         agent_path=agent_path,
@@ -491,19 +507,28 @@ def view(path: str):
                 click.echo(f"  ... and {len(failures) - 10} more")
 
 
+def _is_run_dir(d: Path) -> bool:
+    """Check if a directory is a run directory (has run.json, run_config.json, or status.jsonl)."""
+    return (
+        (d / "run.json").exists()
+        or (d / "run_config.json").exists()
+        or (d / "status.jsonl").exists()
+    )
+
+
 def find_run_dir(run_id: str, results_base: Path) -> Path | None:
     """
     Find the run directory for a given run_id.
     
     Searches for:
-    1. Exact match: {results_base}/*/{run_id}/run.json
-    2. Prefix match: {results_base}/*/*{run_id}*/run.json
+    1. Exact match: {results_base}/*/{run_id}/ with run.json, run_config.json, or status.jsonl
+    2. Prefix match: {results_base}/*/*{run_id}*/ (same file check)
     3. Direct path if run_id is a path
     """
     run_id_path = Path(run_id)
     
-    # If run_id is a direct path to a directory with run.json
-    if run_id_path.is_dir() and (run_id_path / "run.json").exists():
+    # If run_id is a direct path to a run directory
+    if run_id_path.is_dir() and _is_run_dir(run_id_path):
         return run_id_path
     
     # Search under results_base
@@ -517,9 +542,9 @@ def find_run_dir(run_id: str, results_base: Path) -> Path | None:
         for run_dir in benchmark_dir.iterdir():
             if not run_dir.is_dir():
                 continue
-            if run_dir.name == run_id and (run_dir / "run.json").exists():
+            if run_dir.name == run_id and _is_run_dir(run_dir):
                 return run_dir  # Exact match
-            if run_id in run_dir.name and (run_dir / "run.json").exists():
+            if run_id in run_dir.name and _is_run_dir(run_dir):
                 matches.append(run_dir)
     
     if len(matches) == 1:
@@ -529,6 +554,148 @@ def find_run_dir(run_id: str, results_base: Path) -> Path | None:
         return sorted(matches, key=lambda p: p.name)[-1]
     
     return None
+
+
+def load_status_file(status_path: Path) -> dict[str, dict]:
+    """Load status.jsonl and return {task_id: last_status_entry}.
+
+    If a task appears multiple times (e.g. retry after continue), the last
+    entry wins.
+    """
+    results: dict[str, dict] = {}
+    if not status_path.exists():
+        return results
+    for line in status_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            results[entry["task_id"]] = entry
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return results
+
+
+def recover_run_state(run_dir: Path) -> dict:
+    """Recover run configuration and task results from an interrupted run.
+
+    Works even when run.json and summary.json are missing.  Reads from, in
+    priority order:
+      1. run.json — full metadata from a completed run
+      2. run_config.json + status.jsonl — config captured at start, results
+         written in real-time
+      3. status.jsonl + trace file scanning — last resort fallback
+
+    Returns a dict shaped like run.json with at least:
+      run_id, agent, benchmark, model, grader, parallel, max_retries,
+      task_timeout, task_ids (all expected task IDs),
+      completed_task_ids, error_task_ids, incomplete_task_ids,
+      results (list of per-task dicts)
+    """
+    state: dict = {}
+
+    # ------------------------------------------------------------------
+    # 1. Try run.json (completed run)
+    # ------------------------------------------------------------------
+    run_json = run_dir / "run.json"
+    if run_json.exists():
+        state = json.loads(run_json.read_text())
+        # Ensure essential fields exist
+        state.setdefault("completed_task_ids", [])
+        state.setdefault("incomplete_task_ids", [])
+        # Backward compat: old format used failed_task_ids instead of error_task_ids
+        if "error_task_ids" not in state:
+            state["error_task_ids"] = state.get("failed_task_ids", [])
+        else:
+            state.setdefault("error_task_ids", [])
+        return state
+
+    # ------------------------------------------------------------------
+    # 2. Try run_config.json for configuration
+    # ------------------------------------------------------------------
+    config_json = run_dir / "run_config.json"
+    if config_json.exists():
+        config = json.loads(config_json.read_text())
+        state = {
+            "run_id": config.get("run_id", run_dir.name),
+            "agent": config.get("agent"),
+            "benchmark": config.get("benchmark"),
+            "model": config.get("model"),
+            "grader": config.get("grader", "default"),
+            "grader_model": config.get("grader_model"),
+            "parallel": config.get("parallel", 10),
+            "max_retries": config.get("max_retries", 3),
+            "task_timeout": config.get("task_timeout", 300),
+            "num_tasks_requested": config.get("num_tasks") or config.get("total_tasks"),
+            "task_ids": config.get("task_ids", []),
+        }
+    else:
+        # No config at all — infer what we can from the directory name
+        state = {
+            "run_id": run_dir.name,
+            "agent": None,
+            "benchmark": None,
+            "model": None,
+            "grader": "default",
+            "parallel": 10,
+            "max_retries": 3,
+            "task_timeout": 300,
+            "task_ids": [],
+        }
+
+    # ------------------------------------------------------------------
+    # 3. Read status.jsonl for finished task results
+    # ------------------------------------------------------------------
+    status_path = run_dir / "status.jsonl"
+    status_map = load_status_file(status_path)
+
+    # Also gather task IDs from trace files (might have tasks not in status)
+    trace_task_ids = set()
+    for p in run_dir.glob("trace_*.jsonl"):
+        tid = p.name[6:-6]  # strip "trace_" and ".jsonl"
+        trace_task_ids.add(tid)
+
+    # Merge task IDs from all sources
+    all_known_task_ids = set(state.get("task_ids", []))
+    all_known_task_ids |= set(status_map.keys())
+    all_known_task_ids |= trace_task_ids
+
+    # Determine status for each task from status.jsonl
+    completed_ids = []
+    error_ids = []
+    incomplete_ids = []
+    results_data = []
+
+    for tid in sorted(all_known_task_ids):
+        if tid in status_map:
+            entry = status_map[tid]
+            status = entry.get("status", "failed")
+            results_data.append({
+                "task_id": tid,
+                "status": status,
+                "submission": entry.get("submission"),
+                "error": entry.get("error"),
+                "attempts": entry.get("attempts", 1),
+                "duration_ms": entry.get("duration_ms", 0),
+            })
+            if status == "success":
+                completed_ids.append(tid)
+            else:
+                error_ids.append(tid)
+        else:
+            # Task has no status entry — either never started or was
+            # in-progress when the run was killed
+            incomplete_ids.append(tid)
+
+    state["completed_task_ids"] = completed_ids
+    state["error_task_ids"] = error_ids
+    state["incomplete_task_ids"] = incomplete_ids
+    state["results"] = results_data
+    state["task_ids"] = sorted(all_known_task_ids)
+    state.setdefault("num_tasks_requested", len(all_known_task_ids))
+
+    return state
 
 
 @cli.command("continue")
@@ -544,10 +711,14 @@ def continue_run(
     max_retries: int | None,
     task_timeout: int | None,
 ):
-    """Continue a failed run by re-running errored tasks.
+    """Continue a failed or interrupted run.
     
-    Reads run.json from a previous run, re-runs tasks that errored during
-    execution, and updates all output files (traces, grades, summary, run.json).
+    Re-runs tasks that errored or never completed.  Works with:
+    
+    \b
+      - Completed runs (has run.json) — re-runs errored tasks only
+      - Interrupted runs (has status.jsonl / run_config.json / traces) —
+        re-runs errored + incomplete tasks
     
     RUN_ID can be a run ID, a partial match, or a direct path to a run directory.
     
@@ -555,7 +726,7 @@ def continue_run(
     Examples:
         harness continue arithmetic_echo-agent_20260204_225130_5d8519
         harness continue 5d8519
-        harness continue ./results/arithmetic/my-run/
+        harness continue ./results/gaia/gaia_hal-generalist_*_b5c291/
     """
     import asyncio
     import os
@@ -571,24 +742,24 @@ def continue_run(
         click.echo(f"Could not find run directory for '{run_id}' under {results_base}", err=True)
         raise SystemExit(1)
 
-    # Load run.json
-    run_json_path = run_dir / "run.json"
-    run_data = json.loads(run_json_path.read_text())
+    # Recover state — works with run.json, run_config.json, or just traces
+    run_data = recover_run_state(run_dir)
     click.echo(f"Found run: {run_dir}")
 
-    # Get error task IDs (handle both old and new field names)
+    # Determine which tasks need re-running
     error_task_ids = run_data.get("error_task_ids", [])
-    if not error_task_ids:
-        # Backward compat: old format stored execution failures in failed_task_ids
-        # but only if there's no separate error_task_ids field
-        if "error_task_ids" not in run_data:
-            error_task_ids = run_data.get("failed_task_ids", [])
+    incomplete_task_ids = run_data.get("incomplete_task_ids", [])
+    completed_task_ids = run_data.get("completed_task_ids", [])
+    retry_task_ids = error_task_ids + incomplete_task_ids
 
-    if not error_task_ids:
-        click.echo("No errored tasks to re-run. Run completed successfully!")
+    if not retry_task_ids:
+        click.echo("No errored or incomplete tasks to re-run. Run completed successfully!")
         return
 
-    click.echo(f"Re-running {len(error_task_ids)} errored task(s): {', '.join(error_task_ids)}")
+    # Report status
+    click.echo(f"Completed: {len(completed_task_ids)}, Errored: {len(error_task_ids)}, "
+               f"Incomplete: {len(incomplete_task_ids)}")
+    click.echo(f"Re-running {len(retry_task_ids)} task(s)")
 
     # Extract config from previous run
     agent = run_data.get("agent")
@@ -621,23 +792,23 @@ def continue_run(
         click.echo("Cannot continue: no benchmark specified in original run", err=True)
         raise SystemExit(1)
 
-    # Filter to only the errored tasks
-    error_task_set = set(error_task_ids)
-    retry_tasks = [t for t in all_tasks if t.id in error_task_set]
+    # Filter to only the tasks that need re-running
+    retry_task_set = set(retry_task_ids)
+    retry_tasks = [t for t in all_tasks if t.id in retry_task_set]
 
     if not retry_tasks:
-        click.echo(f"Could not find matching tasks in benchmark '{benchmark_name}' for IDs: {error_task_ids}", err=True)
+        click.echo(f"Could not find matching tasks in benchmark '{benchmark_name}' for IDs: {retry_task_ids[:5]}...", err=True)
         raise SystemExit(1)
 
     found_ids = {t.id for t in retry_tasks}
-    missing_ids = error_task_set - found_ids
+    missing_ids = retry_task_set - found_ids
     if missing_ids:
-        click.echo(f"Warning: Could not find tasks for IDs: {', '.join(sorted(missing_ids))}")
+        click.echo(f"Warning: Could not find {len(missing_ids)} task(s) in benchmark")
 
     click.echo(f"Parallel: {eff_parallel}, Retries: {eff_max_retries}, Timeout: {eff_task_timeout}s")
 
-    # Delete old trace files for errored tasks (they'll be regenerated)
-    for task_id in error_task_ids:
+    # Delete old trace files for tasks being re-run (they'll be regenerated)
+    for task_id in retry_task_ids:
         old_trace = run_dir / f"trace_{task_id}.jsonl"
         if old_trace.exists():
             old_trace.unlink()
@@ -670,17 +841,19 @@ def continue_run(
     new_failed = len(new_results) - new_success
     click.echo(f"\nRetry results: {new_success}/{len(new_results)} succeeded, {new_failed} failed")
 
-    # Load existing summary to get old successful results
-    old_summary_path = run_dir / "summary.json"
-    old_results_data = []
-    if old_summary_path.exists():
-        old_summary = json.loads(old_summary_path.read_text())
-        old_results_data = old_summary.get("results", [])
+    # Get previously completed results from recover_run_state or summary.json
+    old_results_data = run_data.get("results", [])
+    if not old_results_data:
+        # Fallback: load from summary.json if recover_run_state didn't have results
+        old_summary_path = run_dir / "summary.json"
+        if old_summary_path.exists():
+            old_summary = json.loads(old_summary_path.read_text())
+            old_results_data = old_summary.get("results", [])
 
-    # Merge: keep old successful results, replace errored ones with new results
+    # Merge: keep old successful results, replace retried ones with new results
     merged_results_data = []
     for old_r in old_results_data:
-        if old_r["task_id"] not in error_task_set:
+        if old_r["task_id"] not in retry_task_set:
             merged_results_data.append(old_r)
 
     # Add new retry results
@@ -842,10 +1015,11 @@ def continue_run(
 
     # Final status
     if new_failed == 0:
-        click.echo(f"\nAll {len(error_task_ids)} previously errored tasks now succeeded!")
+        click.echo(f"\nAll {len(retry_task_ids)} previously incomplete/errored tasks now succeeded!")
     else:
         still_errored = [r.task_id for r in new_results if r.status != "success"]
-        click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored)}")
+        click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored[:10])}"
+                   + (f" (and {len(still_errored) - 10} more)" if len(still_errored) > 10 else ""))
 
 
 DEFAULT_HF_REPO = "fsndzomga/agent-harness-runs"
