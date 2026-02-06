@@ -108,7 +108,7 @@ class TestAgentRunner:
     def test_run_echo_agent(self, tmp_path):
         """Test running the echo agent."""
         # Get path to echo agent
-        agent_path = Path(__file__).parent.parent / "src/harness/examples/echo_agent.py"
+        agent_path = Path(__file__).parent.parent / "agents/echo_agent.py"
         
         if not agent_path.exists():
             pytest.skip("Echo agent not found")

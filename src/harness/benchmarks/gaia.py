@@ -76,7 +76,6 @@ class GAIABenchmark(Benchmark):
             config,
             split=self.split,
             cache_dir=str(self.cache_dir) if self.cache_dir else None,
-            trust_remote_code=True,
         )
     
     def _download_file(self, file_path: str) -> str | None:

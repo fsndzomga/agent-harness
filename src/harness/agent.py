@@ -39,6 +39,12 @@ class Agent:
         self._metrics: dict[str, Any] = {}  # Per-task metrics
         self._tool_sequence: list[str] = []  # Track tool usage order
     
+    @property
+    def model(self) -> str:
+        """Get the model from HARNESS_MODEL env var."""
+        import os
+        return os.environ.get("HARNESS_MODEL", "")
+    
     def run(self) -> None:
         """Main loop: read tasks from stdin, write results to stdout."""
         # Configure provider with stdout logging

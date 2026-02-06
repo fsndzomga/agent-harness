@@ -25,7 +25,7 @@ def sample_run_data():
     return {
         "run_id": "test-run-001",
         "timestamp": "2026-02-05T10:00:00Z",
-        "agent": "src/harness/examples/echo_agent.py",
+        "agent": "agents/echo_agent.py",
         "benchmark": "arithmetic",
         "model": "deepseek/deepseek-chat-v3",
         "grader": "default",

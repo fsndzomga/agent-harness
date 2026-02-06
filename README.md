@@ -31,7 +31,7 @@ export OPENAI_API_KEY="sk-..."
 # Run the simple QA agent on the arithmetic benchmark
 # Output goes to ./results/arithmetic/{run_id}/
 harness run \
-    --agent src/harness/examples/simple_qa_agent.py \
+    --agent agents/simple_qa_agent.py \
     --benchmark arithmetic \
     --num-tasks 10
 
@@ -291,7 +291,7 @@ Every run produces a `run.json` with comprehensive metadata for analysis and dat
 {
   "run_id": "fb0df848",
   "timestamp": "2026-02-04T22:38:44.683841Z",
-  "agent": "src/harness/examples/metrics_agent.py",
+  "agent": "agents/metrics_agent.py",
   "benchmark": "arithmetic",
   "model": "openrouter/deepseek/deepseek-chat-v3-0324",
   "grader": "default",
@@ -493,7 +493,7 @@ poetry run pytest
 
 # Run a quick test
 poetry run harness run-one \
-    --agent src/harness/examples/echo_agent.py \
+    --agent agents/echo_agent.py \
     --task '{"id": "test", "data": {"x": 1}}'
 ```
 
@@ -511,9 +511,9 @@ poetry run harness run-one \
 ### Next Up
 
 - [x] **Continue run**: `harness continue <run_id>` - Re-run `error_task_ids` from a failed run, update traces and all JSON files
-- [ ] **HuggingFace integration**: Create HF dataset repo to store `run.json` files
-- [ ] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
-- [ ] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
+- [x] **HuggingFace integration**: Create HF dataset repo to store `run.json` files
+- [x] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
+- [x] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
 
 ### Future
 

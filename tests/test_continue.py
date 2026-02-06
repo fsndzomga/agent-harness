@@ -14,7 +14,7 @@ from harness.cli import cli, find_run_dir
 
 
 # Path to the echo agent for integration tests
-ECHO_AGENT = str(Path(__file__).parent.parent / "src" / "harness" / "examples" / "echo_agent.py")
+ECHO_AGENT = str(Path(__file__).parent.parent / "agents" / "echo_agent.py")
 
 
 class TestFindRunDir:

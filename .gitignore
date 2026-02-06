@@ -57,3 +57,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 chat/
+
+# Copilot / Chat history
+ChatHistory/
+.github/copilot-instructions.md
+.venv-hal/

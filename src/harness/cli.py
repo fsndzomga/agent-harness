@@ -81,13 +81,44 @@ def cli():
     pass
 
 
+def resolve_agent_path(agent: str) -> Path:
+    """Resolve an agent path, checking agents/ directory as fallback.
+
+    Resolution order:
+      1. Exact path (file or directory)
+      2. agents/{agent} (directory agent)
+      3. agents/{agent}.py (single-file agent)
+    """
+    p = Path(agent)
+    if p.exists():
+        return p
+
+    # Try agents/ directory
+    agents_dir = Path("agents")
+    for candidate in [
+        agents_dir / agent,
+        agents_dir / f"{agent}.py",
+        agents_dir / agent / "agent.py",
+    ]:
+        if candidate.exists():
+            # For directory agents, return the directory (runner handles entry point)
+            if candidate.name == "agent.py" and candidate.parent.is_dir():
+                return candidate.parent
+            return candidate
+
+    raise click.BadParameter(
+        f"Agent not found: '{agent}'. Checked ./ and agents/"
+    )
+
+
 @cli.command("run-one")
-@click.option("--agent", required=True, type=click.Path(exists=True), help="Path to agent")
+@click.option("--agent", required=True, help="Path to agent (file, directory, or name in agents/)")
 @click.option("--task", required=True, help="Task as JSON string")
 @click.option("--timeout", default=300, help="Timeout in seconds")
 @click.option("--output", "-o", type=click.Path(), help="Output directory for traces")
 def run_one(agent: str, task: str, timeout: int, output: str | None):
     """Run agent on a single task."""
+    agent_path = resolve_agent_path(agent)
     
     task_data = json.loads(task)
     task_obj = Task.from_dict(task_data)
@@ -103,9 +134,9 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
             run_id=run_id,
         )
     
-    runner = AgentRunner(Path(agent), logger=logger)
+    runner = AgentRunner(agent_path, logger=logger)
     
-    click.echo(f"Running {agent} on task {task_obj.id}...")
+    click.echo(f"Running {agent_path} on task {task_obj.id}...")
     
     try:
         result = runner.run(task_obj, timeout=timeout)
@@ -129,7 +160,7 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
 
 
 @cli.command("run")
-@click.option("--agent", required=True, type=click.Path(exists=True), help="Path to agent")
+@click.option("--agent", required=True, help="Path to agent (file, directory, or name in agents/)")
 @click.option("--benchmark", "-b", help="Benchmark name (e.g., 'arithmetic', 'gaia')")
 @click.option("--tasks-file", type=click.Path(exists=True), help="JSONL file with tasks (alternative to --benchmark)")
 @click.option("--output", "-o", type=click.Path(), default="./results", help="Base output directory (default: ./results)")
@@ -162,6 +193,8 @@ def run(
     import os
     
     from .parallel import ParallelRunner, RetryConfig
+    
+    agent_path = resolve_agent_path(agent)
     
     if not benchmark and not tasks_file:
         raise click.UsageError("Must specify either --benchmark or --tasks-file")
@@ -223,7 +256,7 @@ def run(
     
     # Run
     runner = ParallelRunner(
-        agent_path=Path(agent),
+        agent_path=agent_path,
         output_dir=output_dir,
         max_parallel=parallel,
         retry_config=RetryConfig(max_retries=max_retries),
@@ -573,10 +606,7 @@ def continue_run(
     eff_task_timeout = task_timeout if task_timeout is not None else prev_task_timeout
 
     # Validate agent path
-    agent_path = Path(agent)
-    if not agent_path.exists():
-        click.echo(f"Agent not found: {agent}", err=True)
-        raise SystemExit(1)
+    agent_path = resolve_agent_path(agent)
 
     # Set model env var if specified
     if model:
