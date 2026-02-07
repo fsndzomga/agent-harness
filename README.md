@@ -91,7 +91,7 @@ Write agents in any language - the harness auto-detects how to run them based on
 
 | Language | File Extension | Directory Entry | Project Detection |
 |----------|---------------|-----------------|-------------------|
-| Python | `.py` | `agent.py`, `__main__.py` | - |
+| Python | `.py` | `agent.py`, `__main__.py` | `.venv/` or `venv/` → uses venv python |
 | Ruby | `.rb` | `agent.rb` | `Gemfile` → `bundle exec` |
 | JavaScript | `.js`, `.mjs` | `agent.js` | `package.json` → `npm start` |
 | TypeScript | `.ts` | `agent.ts` | - |
@@ -181,6 +181,29 @@ Then run:
 ```bash
 harness run --agent ./my-agent --benchmark gaia-level1
 ```
+
+### Virtual Environment Auto-Detection
+
+When running a **directory-based Python agent**, the harness automatically checks for a virtual environment inside the agent directory. If `.venv/bin/python` or `venv/bin/python` exists, it will be used instead of the system `python`.
+
+This is critical for agents that depend on packages not installed in the harness environment (e.g. `smolagents`, `pymupdf`, etc.).
+
+```bash
+# Example: agent with its own venv
+agents/hal_generalist/
+├── agent.py
+├── requirements.txt
+└── .venv/              # ← harness will use .venv/bin/python automatically
+    └── bin/python
+
+# If the venv lives elsewhere, symlink it:
+ln -s ../../.venv-hal agents/hal_generalist/.venv
+
+# Now the harness runs: .venv/bin/python agents/hal_generalist/agent.py
+# instead of:          python agents/hal_generalist/agent.py
+```
+
+> **Important**: Without this, agents that import packages only available in their venv will fail with `ModuleNotFoundError` at runtime. If your agent has custom dependencies, always ensure a `.venv` exists in the agent directory (even as a symlink).
 
 ## Benchmarks
 
@@ -430,6 +453,65 @@ Options:
 - **`--output`**: Base directory (default: `./results`)
 - **`--run-id`**: Override with custom run ID
 
+## Continuing Runs
+
+The `harness continue` command re-runs tasks that failed or never completed. It works with:
+
+- **Completed runs** (has `run.json`) — re-runs errored tasks
+- **Interrupted runs** (has `status.jsonl` / `run_config.json`) — re-runs errored + incomplete tasks
+- **Old interrupted runs** (only trace files) — scans traces for completion status, requires `--agent` and `--benchmark`
+
+```bash
+# Continue by run ID (exact or partial match)
+harness continue 5d8519
+
+# Continue an old interrupted run that has no config files
+harness continue b5c291 \
+    --agent agents/hal_generalist \
+    --benchmark gaia \
+    --model openrouter/deepseek/deepseek-chat-v3-0324 \
+    --parallel 50 \
+    --task-timeout 1800
+
+# Continue by direct path
+harness continue ./results/gaia/gaia_hal-generalist_*_b5c291/
+```
+
+### How Recovery Works
+
+The harness recovers run state from whatever files are available, in priority order:
+
+| Source | What it provides |
+|--------|------------------|
+| `run.json` | Full metadata from a completed run |
+| `run_config.json` | Agent, benchmark, model, task IDs (written at run start) |
+| `status.jsonl` | Real-time task results (append-only, crash-safe) |
+| `trace_*.jsonl` | Scanned for `task_complete` / `task_error` events |
+| CLI flags | `--agent`, `--benchmark`, `--model` override or supply missing config |
+
+### Crash-Safe Progress Tracking
+
+Every run now writes two recovery files:
+
+- **`run_config.json`** — Written at the start of the run with full configuration and the list of all task IDs. This ensures the harness knows what was supposed to run even if the process is killed.
+- **`status.jsonl`** — Append-only JSONL file written after each task completes or fails. Each line contains `task_id`, `status`, `submission`/`error`, `attempts`, `duration_ms`, and `timestamp`. Uses `flush()` for crash safety.
+
+These files enable `harness continue` to pick up exactly where a killed run left off — no work is lost.
+
+### Trace Scanning (Legacy Runs)
+
+For old runs that pre-date `status.jsonl` (only have `trace_*.jsonl` files), the harness scans each trace for completion events:
+
+| Trace content | Classification |
+|---------------|----------------|
+| Has `task_complete` event | **Completed** — submission preserved, won't re-run |
+| Has `task_error` event | **Errored** — will be retried |
+| Has `task_start` but no completion | **Interrupted** — will be retried |
+| Empty file | **Incomplete** — will be retried |
+| No trace file at all | **Never started** — discovered from benchmark, will be run |
+
+When `--benchmark` is provided but no `run_config.json` exists, the harness discovers all benchmark tasks and marks any without traces as incomplete.
+
 ## CLI Reference
 
 ```bash
@@ -464,6 +546,10 @@ harness benchmarks
 
 # View results
 harness view ./results/gaia-level1/my-run
+
+# Continue a failed or interrupted run
+harness continue <run_id>
+harness continue <run_id> --agent ./agent --benchmark gaia --parallel 50
 ```
 
 ## Configuration
@@ -510,7 +596,7 @@ poetry run harness run-one \
 
 ### Next Up
 
-- [x] **Continue run**: `harness continue <run_id>` - Re-run `error_task_ids` from a failed run, update traces and all JSON files
+- [x] **Continue run**: `harness continue <run_id>` - Re-run errored/interrupted tasks with crash-safe recovery (`status.jsonl`, trace scanning, CLI overrides)
 - [x] **HuggingFace integration**: Create HF dataset repo to store `run.json` files
 - [x] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
 - [x] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
