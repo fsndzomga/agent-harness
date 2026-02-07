@@ -245,6 +245,12 @@ DEFAULT_MATCHERS: list[tuple[str, Callable[[str, str], bool]]] = [
     ("exact", exact_match),
     ("normalized", normalized_match),
     ("numeric", numeric_match),
+]
+
+ALL_MATCHERS: list[tuple[str, Callable[[str, str], bool]]] = [
+    ("exact", exact_match),
+    ("normalized", normalized_match),
+    ("numeric", numeric_match),
     ("contains", contains_match),
     ("fuzzy", fuzzy_match),
 ]
@@ -284,20 +290,21 @@ class PipelineGrader(Grader):
 # LLM-as-Judge Grader
 # ============================================================================
 
-LLM_JUDGE_PROMPT = """You are evaluating whether a submission correctly answers a question.
-
-Question context may be provided. Your task is to determine if the submission is correct.
+LLM_JUDGE_PROMPT = """You are a strict evaluator. Determine whether a submission matches the expected answer.
 
 Expected answer: {expected}
 Submission: {submission}
 
-Consider:
-1. The submission may be phrased differently but still correct
-2. Numeric answers may have minor rounding differences
-3. The submission may include extra explanation - focus on the core answer
-4. Be lenient with formatting differences (quotes, punctuation, capitalization)
+Rules — apply these strictly:
+1. The submission must convey the SAME factual content as the expected answer.
+2. If both are numbers, they must be equal (or within trivial rounding, e.g. 3.14 vs 3.141).
+   A different number is INCORRECT — do NOT assume unit conversions or scale differences.
+3. Minor formatting differences are acceptable (capitalization, punctuation, whitespace).
+4. If the submission contains extra text but includes the correct answer, that is CORRECT.
+5. If the submission is a completely different word, value, or concept, it is INCORRECT.
+6. When in doubt, answer INCORRECT.
 
-Is the submission correct? Reply with ONLY "CORRECT" or "INCORRECT" (no explanation)."""
+Reply with ONLY "CORRECT" or "INCORRECT" (no explanation)."""
 
 
 class LLMJudge:
@@ -339,7 +346,7 @@ class LLMJudge:
                 )
             )
             answer = response.message.content.strip().upper()
-            passed = "CORRECT" in answer
+            passed = answer.startswith("CORRECT") or answer == "CORRECT"
             return passed, "llm_judge", answer
         except Exception as e:
             return False, "llm_judge_error", str(e)
@@ -410,7 +417,7 @@ def _register_builtins() -> None:
     register_grader("fuzzy", lambda **kw: FuzzyGrader())
     register_grader("strict", lambda **kw: StrictGrader())
     register_grader("default", lambda **kw: PipelineGrader())
-    register_grader("all", lambda **kw: PipelineGrader(grader_name="all"))
+    register_grader("all", lambda **kw: PipelineGrader(matchers=ALL_MATCHERS, grader_name="all"))
     register_grader("llm", lambda **kw: LLMJudgeGrader(model=kw.get("model")))
     register_grader(
         "llm-fallback",
@@ -467,7 +474,7 @@ GRADER_PRESETS = {
     "fuzzy": [("fuzzy", fuzzy_match)],
     "strict": [("exact", exact_match), ("normalized", normalized_match)],
     "default": DEFAULT_MATCHERS,
-    "all": DEFAULT_MATCHERS,
+    "all": ALL_MATCHERS,
 }
 
 
