@@ -116,9 +116,12 @@ def exact_match(submission: str, expected: str) -> bool:
 
 
 def normalized_match(submission: str, expected: str) -> bool:
-    """Match after normalizing whitespace and case."""
+    """Match after normalizing whitespace, case, and comma spacing."""
     def normalize(s: str) -> str:
-        return re.sub(r'\s+', ' ', s.lower().strip())
+        s = s.lower().strip()
+        s = re.sub(r'\s*,\s*', ', ', s)   # canonical comma spacing
+        s = re.sub(r'\s+', ' ', s)
+        return s
     return normalize(submission) == normalize(expected)
 
 
