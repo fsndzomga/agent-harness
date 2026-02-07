@@ -1,6 +1,8 @@
 """Core smolagents runner — mirrors HAL's hal_generalist_agent/main.py."""
 
 import os
+import sys
+import time
 
 from smolagents import (
     CodeAgent,
@@ -10,6 +12,30 @@ from smolagents import (
 )
 from .tools import read_file_tool
 from .prompts import GAIA_SYSTEM_PROMPT
+
+
+def _step_callback(step):
+    """Log each agent step to stderr so the harness can capture progress."""
+    step_num = getattr(step, "step_number", "?")
+    error = getattr(step, "error", None)
+    code = getattr(step, "code_action", None)
+    obs = getattr(step, "observations", None)
+    is_final = getattr(step, "is_final_answer", False)
+    token_usage = getattr(step, "token_usage", None)
+
+    parts = [f"[step {step_num}]"]
+    if is_final:
+        parts.append("FINAL")
+    if error:
+        parts.append(f"error={error}")
+    if code:
+        parts.append(f"code={code[:120]}...")
+    if obs:
+        parts.append(f"obs={str(obs)[:120]}...")
+    if token_usage:
+        parts.append(f"tokens={token_usage}")
+
+    print(" ".join(parts), file=sys.stderr, flush=True)
 
 
 def run_gaia_task(
@@ -47,6 +73,7 @@ def run_gaia_task(
         tools=tools,
         model=model,
         max_steps=max_steps,
+        step_callbacks=[_step_callback],
         additional_authorized_imports=[
             "json", "csv", "re", "math", "datetime",
             "collections", "itertools", "functools",

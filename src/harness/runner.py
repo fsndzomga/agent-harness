@@ -147,13 +147,26 @@ class AgentRunner:
             stdout, stderr = proc.communicate(input=request_line + "\n", timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()  # Clean up
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
             if self.logger:
-                self.logger.log("task_timeout", task_id=task.id, timeout=timeout)
+                self.logger.log(
+                    "task_timeout",
+                    task_id=task.id,
+                    timeout=timeout,
+                    stderr=stderr.strip()[-2000:] if stderr else "",
+                    stdout_tail=stdout.strip()[-2000:] if stdout else "",
+                )
             raise TimeoutError(f"Agent timed out after {timeout}s")
         
         # Process output lines
         submission = None
+
+        # Always log stderr when present (agent step progress, warnings, etc.)
+        if stderr and stderr.strip() and self.logger:
+            self.logger.log("agent_stderr", content=stderr.strip()[-4000:])
         
         for line in stdout.strip().split("\n"):
             line = line.strip()

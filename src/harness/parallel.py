@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -106,6 +107,10 @@ class ParallelRunner:
         self.agent_env = agent_env or {}
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Size the thread pool to match parallelism so tasks aren't
+        # queued behind others while their asyncio timeout ticks.
+        self._executor = ThreadPoolExecutor(max_workers=max_parallel)
         
         # Real-time status file — append-only for crash safety.
         # Each line records one task completion/failure so that
@@ -265,12 +270,29 @@ class ParallelRunner:
         runner = AgentRunner(self.agent_path, logger=logger, env=self.agent_env)
         
         try:
-            # Run in thread pool to not block event loop
+            # Use our properly-sized executor so every task gets a
+            # thread immediately and the subprocess timeout fires
+            # before the asyncio safety timeout.
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, runner.run, task, self.task_timeout),
-                timeout=self.task_timeout + 10,  # Extra buffer for process cleanup
+                loop.run_in_executor(
+                    self._executor, runner.run, task, self.task_timeout
+                ),
+                timeout=self.task_timeout + 30,  # Safety buffer for process cleanup
             )
             return result
+        except asyncio.TimeoutError:
+            # The asyncio safety timeout fired (subprocess timeout
+            # should have triggered first).  Log it so traces aren't
+            # empty and re-raise as a regular TimeoutError.
+            logger.log(
+                "task_timeout",
+                task_id=task.id,
+                timeout=self.task_timeout,
+                note="asyncio safety timeout — subprocess may still be running",
+            )
+            raise TimeoutError(
+                f"Agent timed out after {self.task_timeout}s (asyncio safety)"
+            )
         finally:
             logger.close()
     
