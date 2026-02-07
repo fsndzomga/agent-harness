@@ -508,11 +508,16 @@ def view(path: str):
 
 
 def _is_run_dir(d: Path) -> bool:
-    """Check if a directory is a run directory (has run.json, run_config.json, or status.jsonl)."""
+    """Check if a directory is a run directory.
+
+    Recognised markers: run.json, run_config.json, status.jsonl, or any
+    trace_*.jsonl file (for old interrupted runs that pre-date status tracking).
+    """
     return (
         (d / "run.json").exists()
         or (d / "run_config.json").exists()
         or (d / "status.jsonl").exists()
+        or any(d.glob("trace_*.jsonl"))
     )
 
 
@@ -650,18 +655,57 @@ def recover_run_state(run_dir: Path) -> dict:
     status_path = run_dir / "status.jsonl"
     status_map = load_status_file(status_path)
 
-    # Also gather task IDs from trace files (might have tasks not in status)
+    # ------------------------------------------------------------------
+    # 3b. Scan trace files for task_complete / task_error events.
+    #     This is the fallback for old runs that pre-date status.jsonl.
+    #     status_map entries always take priority over trace scanning.
+    # ------------------------------------------------------------------
     trace_task_ids = set()
+    trace_scan: dict[str, dict] = {}  # tid -> {"status": ..., "submission": ...}
     for p in run_dir.glob("trace_*.jsonl"):
         tid = p.name[6:-6]  # strip "trace_" and ".jsonl"
         trace_task_ids.add(tid)
+        # Only scan when the task is NOT already in status_map
+        if tid not in status_map:
+            try:
+                text = p.read_text()
+            except OSError:
+                continue
+            has_start = False
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(evt, dict):
+                    continue
+                etype = evt.get("type")
+                if etype == "task_start":
+                    has_start = True
+                elif etype == "task_complete":
+                    trace_scan[tid] = {
+                        "status": "success",
+                        "submission": evt.get("submission"),
+                        "duration_ms": evt.get("duration_ms", 0),
+                    }
+                elif etype == "task_error":
+                    trace_scan[tid] = {
+                        "status": "failed",
+                        "error": evt.get("error"),
+                    }
+            # If trace has a start but no completion/error → interrupted
+            if tid not in trace_scan and has_start:
+                trace_scan[tid] = {"status": "interrupted"}
 
     # Merge task IDs from all sources
     all_known_task_ids = set(state.get("task_ids", []))
     all_known_task_ids |= set(status_map.keys())
     all_known_task_ids |= trace_task_ids
 
-    # Determine status for each task from status.jsonl
+    # Determine status for each task
     completed_ids = []
     error_ids = []
     incomplete_ids = []
@@ -669,6 +713,7 @@ def recover_run_state(run_dir: Path) -> dict:
 
     for tid in sorted(all_known_task_ids):
         if tid in status_map:
+            # Real-time status file — highest priority
             entry = status_map[tid]
             status = entry.get("status", "failed")
             results_data.append({
@@ -683,9 +728,25 @@ def recover_run_state(run_dir: Path) -> dict:
                 completed_ids.append(tid)
             else:
                 error_ids.append(tid)
+        elif tid in trace_scan:
+            # Scanned from trace file events
+            ts = trace_scan[tid]
+            ts_status = ts.get("status", "failed")
+            results_data.append({
+                "task_id": tid,
+                "status": ts_status,
+                "submission": ts.get("submission"),
+                "error": ts.get("error"),
+                "attempts": 1,
+                "duration_ms": ts.get("duration_ms", 0),
+            })
+            if ts_status == "success":
+                completed_ids.append(tid)
+            else:
+                # interrupted and failed both need re-running
+                error_ids.append(tid)
         else:
-            # Task has no status entry — either never started or was
-            # in-progress when the run was killed
+            # Task has no status entry and no trace — never started
             incomplete_ids.append(tid)
 
     state["completed_task_ids"] = completed_ids
@@ -701,12 +762,22 @@ def recover_run_state(run_dir: Path) -> dict:
 @cli.command("continue")
 @click.argument("run_id")
 @click.option("--output", "-o", type=click.Path(), default="./results", help="Base results directory (default: ./results)")
+@click.option("--agent", "-a", type=str, help="Override or supply agent (required for old runs without config)")
+@click.option("--benchmark", "-b", type=str, help="Override or supply benchmark (required for old runs without config)")
+@click.option("--model", "-m", type=str, help="Override or supply model")
+@click.option("--grader", type=str, help="Override grader")
+@click.option("--grader-model", type=str, help="Override grader model")
 @click.option("--parallel", "-p", type=int, help="Override parallel workers")
 @click.option("--max-retries", type=int, help="Override max retries")
 @click.option("--task-timeout", type=int, help="Override task timeout")
 def continue_run(
     run_id: str,
     output: str,
+    agent: str | None,
+    benchmark: str | None,
+    model: str | None,
+    grader: str | None,
+    grader_model: str | None,
     parallel: int | None,
     max_retries: int | None,
     task_timeout: int | None,
@@ -719,13 +790,15 @@ def continue_run(
       - Completed runs (has run.json) — re-runs errored tasks only
       - Interrupted runs (has status.jsonl / run_config.json / traces) —
         re-runs errored + incomplete tasks
+      - Old interrupted runs (only trace files) — scans traces for
+        task_complete / task_error events. Requires --agent and --benchmark.
     
     RUN_ID can be a run ID, a partial match, or a direct path to a run directory.
     
     \b
     Examples:
-        harness continue arithmetic_echo-agent_20260204_225130_5d8519
         harness continue 5d8519
+        harness continue b5c291 --agent agents/hal_generalist --benchmark gaia
         harness continue ./results/gaia/gaia_hal-generalist_*_b5c291/
     """
     import asyncio
@@ -746,6 +819,49 @@ def continue_run(
     run_data = recover_run_state(run_dir)
     click.echo(f"Found run: {run_dir}")
 
+    # CLI overrides for config fields — essential for old runs that have no
+    # run_config.json or run.json and therefore have None for agent/benchmark.
+    if agent:
+        run_data["agent"] = agent
+    if benchmark:
+        run_data["benchmark"] = benchmark
+    if model:
+        run_data["model"] = model
+    if grader:
+        run_data["grader"] = grader
+    if grader_model:
+        run_data["grader_model"] = grader_model
+
+    # Extract config from previous run (+ CLI overrides applied above)
+    eff_agent = run_data.get("agent")
+    benchmark_name = run_data.get("benchmark")
+    eff_model = run_data.get("model")
+    eff_grader = run_data.get("grader", "default")
+    eff_grader_model = run_data.get("grader_model")
+    prev_parallel = run_data.get("parallel", 10)
+    prev_max_retries = run_data.get("max_retries", 3)
+    prev_task_timeout = run_data.get("task_timeout", 300)
+
+    # When a benchmark is known and we recovered from an interrupted run
+    # that has NO definitive task list (no run.json, no run_config.json),
+    # discover ALL tasks in the benchmark and mark tasks without traces
+    # as incomplete — this catches tasks that never started.
+    # We skip this when run.json or run_config.json exists since those
+    # already have a definitive task list via completed_task_ids or task_ids.
+    has_run_json = (run_dir / "run.json").exists()
+    has_run_config = (run_dir / "run_config.json").exists()
+    if benchmark_name and not has_run_json and not has_run_config:
+        from .benchmarks.registry import get_benchmark
+        bench = get_benchmark(benchmark_name)
+        all_benchmark_task_ids = {t.id for t in bench.get_tasks()}
+        known_task_ids = set(run_data.get("task_ids", []))
+        newly_discovered = all_benchmark_task_ids - known_task_ids
+        if newly_discovered:
+            click.echo(f"Discovered {len(newly_discovered)} additional task(s) from benchmark '{benchmark_name}'")
+            run_data.setdefault("incomplete_task_ids", [])
+            run_data["incomplete_task_ids"].extend(sorted(newly_discovered))
+            run_data["task_ids"] = sorted(known_task_ids | newly_discovered)
+
     # Determine which tasks need re-running
     error_task_ids = run_data.get("error_task_ids", [])
     incomplete_task_ids = run_data.get("incomplete_task_ids", [])
@@ -761,36 +877,33 @@ def continue_run(
                f"Incomplete: {len(incomplete_task_ids)}")
     click.echo(f"Re-running {len(retry_task_ids)} task(s)")
 
-    # Extract config from previous run
-    agent = run_data.get("agent")
-    benchmark_name = run_data.get("benchmark")
-    model = run_data.get("model")
-    grader = run_data.get("grader", "default")
-    grader_model = run_data.get("grader_model")
-    prev_parallel = run_data.get("parallel", 10)
-    prev_max_retries = run_data.get("max_retries", 3)
-    prev_task_timeout = run_data.get("task_timeout", 300)
-
     # Allow CLI overrides
     eff_parallel = parallel if parallel is not None else prev_parallel
     eff_max_retries = max_retries if max_retries is not None else prev_max_retries
     eff_task_timeout = task_timeout if task_timeout is not None else prev_task_timeout
 
+    # Validate required fields
+    if not eff_agent:
+        click.echo("Cannot continue: no agent specified. Use --agent to supply one.", err=True)
+        raise SystemExit(1)
+    if not benchmark_name:
+        click.echo("Cannot continue: no benchmark specified. Use --benchmark to supply one.", err=True)
+        raise SystemExit(1)
+
     # Validate agent path
-    agent_path = resolve_agent_path(agent)
+    agent_path = resolve_agent_path(eff_agent)
 
     # Set model env var if specified
-    if model:
-        os.environ["HARNESS_MODEL"] = model
+    if eff_model:
+        os.environ["HARNESS_MODEL"] = eff_model
 
-    # Load tasks from benchmark or tasks-file
-    if benchmark_name:
+    # Load tasks from benchmark (already loaded above if benchmark was known)
+    try:
+        bench  # noqa: B018 – may be undefined when benchmark came from CLI override
+    except NameError:
         from .benchmarks.registry import get_benchmark
         bench = get_benchmark(benchmark_name)
-        all_tasks = bench.get_tasks()
-    else:
-        click.echo("Cannot continue: no benchmark specified in original run", err=True)
-        raise SystemExit(1)
+    all_tasks = bench.get_tasks()
 
     # Filter to only the tasks that need re-running
     retry_task_set = set(retry_task_ids)
@@ -874,7 +987,7 @@ def continue_run(
     # Grade all submissions (not just the retried ones)
     grade_results = None
     if benchmark_name and bench and hasattr(bench, 'grade'):
-        click.echo(f"\nGrading with '{grader}' grader...")
+        click.echo(f"\nGrading with '{eff_grader}' grader...")
 
         from .benchmarks.graders import (
             get_grader_preset,
@@ -899,16 +1012,16 @@ def continue_run(
             expected = bench._answers.get(task_id, "")
             question = task_data_map.get(task_id, {}).get("question", "")
 
-            if grader == "llm":
-                judge = LLMJudge(model=grader_model or model)
+            if eff_grader == "llm":
+                judge = LLMJudge(model=eff_grader_model or eff_model)
                 passed, method, _ = judge.grade(submission, expected, question)
-            elif grader == "llm-fallback":
+            elif eff_grader == "llm-fallback":
                 passed, method = grade_with_llm_fallback(
                     submission, expected, question,
-                    llm_model=grader_model or model,
+                    llm_model=eff_grader_model or eff_model,
                 )
             else:
-                graders_list = get_grader_preset(grader)
+                graders_list = get_grader_preset(eff_grader)
                 passed, method = grade_with_pipeline(submission, expected, graders_list)
 
             grade_results.append(GradeResult(
@@ -943,7 +1056,7 @@ def continue_run(
     # Save updated summary
     summary = {
         "benchmark": benchmark_name,
-        "model": model,
+        "model": eff_model,
         "total": len(merged_results_data),
         "success": total_success,
         "failed": total_failed,
@@ -971,10 +1084,10 @@ def continue_run(
 
     run_config = {
         "run_id": run_data["run_id"],
-        "agent": agent,
+        "agent": eff_agent,
         "benchmark": benchmark_name,
-        "model": model,
-        "grader": grader,
+        "model": eff_model,
+        "grader": eff_grader,
         "parallel": eff_parallel,
         "max_retries": eff_max_retries,
         "task_timeout": eff_task_timeout,

@@ -528,7 +528,11 @@ class TestRecoverRunState:
         assert state["incomplete_task_ids"] == []
 
     def test_discovers_tasks_from_traces(self, tmp_path):
-        """Finds tasks that have trace files but no status entry."""
+        """Finds tasks that have trace files but no status entry.
+
+        t2 has task_start but no task_complete → classified as errored (interrupted).
+        t3 has an empty trace → classified as incomplete (never started).
+        """
         run_dir = tmp_path / "run1"
         run_dir.mkdir()
         (run_dir / "run_config.json").write_text(json.dumps({
@@ -550,7 +554,107 @@ class TestRecoverRunState:
 
         state = recover_run_state(run_dir)
         assert state["completed_task_ids"] == ["t1"]
-        assert sorted(state["incomplete_task_ids"]) == ["t2", "t3"]
+        # t2 was interrupted (has start, no completion) → errored
+        assert "t2" in state["error_task_ids"]
+        # t3 has empty trace → incomplete
+        assert "t3" in state["incomplete_task_ids"]
+
+    def test_trace_scan_task_complete(self, tmp_path):
+        """Trace scanning picks up task_complete events as success."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        lines = [
+            json.dumps({"type": "task_start", "task_id": "t1"}),
+            json.dumps({"type": "agent_stdout", "content": "some output"}),
+            json.dumps({"type": "task_complete", "task_id": "t1", "submission": "42", "duration_ms": 5000}),
+        ]
+        (run_dir / "trace_t1.jsonl").write_text("\n".join(lines) + "\n")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == ["t1"]
+        assert state["error_task_ids"] == []
+        assert state["incomplete_task_ids"] == []
+        # Verify submission is captured
+        result = [r for r in state["results"] if r["task_id"] == "t1"][0]
+        assert result["submission"] == "42"
+        assert result["duration_ms"] == 5000
+
+    def test_trace_scan_task_error(self, tmp_path):
+        """Trace scanning picks up task_error events as failed."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        lines = [
+            json.dumps({"type": "task_start", "task_id": "t1"}),
+            json.dumps({"type": "task_error", "task_id": "t1", "error": "boom"}),
+        ]
+        (run_dir / "trace_t1.jsonl").write_text("\n".join(lines) + "\n")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == []
+        assert state["error_task_ids"] == ["t1"]
+        result = [r for r in state["results"] if r["task_id"] == "t1"][0]
+        assert result["error"] == "boom"
+        assert result["status"] == "failed"
+
+    def test_trace_scan_interrupted(self, tmp_path):
+        """Trace with task_start but no completion is 'interrupted'."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        lines = [
+            json.dumps({"type": "task_start", "task_id": "t1"}),
+            json.dumps({"type": "agent_stdout", "content": "partial work"}),
+        ]
+        (run_dir / "trace_t1.jsonl").write_text("\n".join(lines) + "\n")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == []
+        assert state["error_task_ids"] == ["t1"]
+        result = [r for r in state["results"] if r["task_id"] == "t1"][0]
+        assert result["status"] == "interrupted"
+
+    def test_status_takes_priority_over_trace_scan(self, tmp_path):
+        """status.jsonl entries override trace scanning results."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        # status.jsonl says success
+        (run_dir / "status.jsonl").write_text(
+            json.dumps({"task_id": "t1", "status": "success", "submission": "correct"}) + "\n"
+        )
+        # trace file still has only task_start (would be interrupted)
+        lines = [
+            json.dumps({"type": "task_start", "task_id": "t1"}),
+        ]
+        (run_dir / "trace_t1.jsonl").write_text("\n".join(lines) + "\n")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == ["t1"]
+        assert state["error_task_ids"] == []
+
+    def test_mixed_trace_statuses(self, tmp_path):
+        """Mix of completed, errored, interrupted, and empty traces."""
+        run_dir = tmp_path / "run1"
+        run_dir.mkdir()
+        # t1: completed
+        (run_dir / "trace_t1.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "t1"}) + "\n" +
+            json.dumps({"type": "task_complete", "task_id": "t1", "submission": "a"}) + "\n"
+        )
+        # t2: errored
+        (run_dir / "trace_t2.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "t2"}) + "\n" +
+            json.dumps({"type": "task_error", "task_id": "t2", "error": "fail"}) + "\n"
+        )
+        # t3: interrupted
+        (run_dir / "trace_t3.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "t3"}) + "\n"
+        )
+        # t4: empty (never started)
+        (run_dir / "trace_t4.jsonl").write_text("")
+
+        state = recover_run_state(run_dir)
+        assert state["completed_task_ids"] == ["t1"]
+        assert sorted(state["error_task_ids"]) == ["t2", "t3"]
+        assert state["incomplete_task_ids"] == ["t4"]
 
     def test_empty_dir(self, tmp_path):
         """Handles a directory with nothing useful."""
@@ -600,12 +704,20 @@ class TestFindRunDirEnhanced:
         assert result == run_dir
 
     def test_dir_without_any_marker_not_found(self, tmp_path):
-        """Dir without run.json, run_config.json, or status.jsonl is not found."""
+        """Dir without run.json, run_config.json, status.jsonl, or traces is not found."""
         run_dir = tmp_path / "gaia" / "gaia-run-789"
         run_dir.mkdir(parents=True)
-        (run_dir / "trace_t1.jsonl").write_text("")  # Only trace files
+        (run_dir / "readme.txt").write_text("not a run")
         result = find_run_dir("gaia-run-789", tmp_path)
         assert result is None
+
+    def test_finds_dir_with_traces_only(self, tmp_path):
+        """Find run dir that only has trace files (old interrupted run)."""
+        run_dir = tmp_path / "gaia" / "gaia-run-old"
+        run_dir.mkdir(parents=True)
+        (run_dir / "trace_t1.jsonl").write_text("")
+        result = find_run_dir("gaia-run-old", tmp_path)
+        assert result == run_dir
 
 
 class TestStatusFileWriting:
@@ -710,7 +822,12 @@ class TestContinueInterruptedRun:
         return run_dir
 
     def test_continue_interrupted_run(self, tmp_path):
-        """Continue picks up 3 incomplete tasks from an interrupted run."""
+        """Continue picks up incomplete tasks from an interrupted run.
+
+        arith_002 has task_start but no completion → errored (interrupted)
+        arith_003 has empty trace → incomplete
+        arith_004 has no trace at all → incomplete
+        """
         run_dir = self._create_interrupted_run(tmp_path)
 
         runner = CliRunner()
@@ -721,7 +838,8 @@ class TestContinueInterruptedRun:
 
         assert result.exit_code == 0, f"Failed with output:\n{result.output}"
         assert "Completed: 2" in result.output
-        assert "Incomplete: 3" in result.output
+        assert "Errored: 1" in result.output
+        assert "Incomplete: 2" in result.output
         assert "Re-running 3 task" in result.output
 
         # run.json should now exist
@@ -766,3 +884,67 @@ class TestContinueInterruptedRun:
         assert result.exit_code == 0, f"Failed with output:\n{result.output}"
         assert "Parallel: 10" in result.output
         assert "Timeout: 60s" in result.output
+
+    def test_continue_trace_only_with_cli_overrides(self, tmp_path):
+        """Continue an old interrupted run that only has trace files.
+
+        Requires --agent and --benchmark supplied via CLI since there's no
+        run_config.json or run.json.
+        """
+        run_dir = tmp_path / "arithmetic" / "trace-only-run"
+        run_dir.mkdir(parents=True)
+
+        # Create trace files mimicking an old interrupted run:
+        # arith_000: completed
+        (run_dir / "trace_arith_000.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "arith_000"}) + "\n" +
+            json.dumps({"type": "task_complete", "task_id": "arith_000", "submission": "42", "duration_ms": 1000}) + "\n"
+        )
+        # arith_001: interrupted (started but no completion)
+        (run_dir / "trace_arith_001.jsonl").write_text(
+            json.dumps({"type": "task_start", "task_id": "arith_001"}) + "\n"
+        )
+        # arith_002: empty trace (never started)
+        (run_dir / "trace_arith_002.jsonl").write_text("")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", str(run_dir),
+            "--agent", ECHO_AGENT,
+            "--benchmark", "arithmetic",
+        ])
+
+        assert result.exit_code == 0, f"Failed with output:\n{result.output}"
+        assert "Completed: 1" in result.output
+        # arith_001 errored (interrupted) + arith_002 incomplete + discovered from benchmark
+        assert "Discovered" in result.output
+        assert (run_dir / "summary.json").exists()
+
+    def test_continue_no_agent_errors(self, tmp_path):
+        """Continue fails if no agent can be determined."""
+        run_dir = tmp_path / "gaia" / "mystery-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "trace_t1.jsonl").write_text("")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", str(run_dir),
+            "--benchmark", "arithmetic",
+        ])
+
+        assert result.exit_code != 0
+        assert "no agent specified" in result.output.lower() or "no agent specified" in (result.output + (result.exception and str(result.exception) or "")).lower()
+
+    def test_continue_no_benchmark_errors(self, tmp_path):
+        """Continue fails if no benchmark can be determined."""
+        run_dir = tmp_path / "gaia" / "mystery-run2"
+        run_dir.mkdir(parents=True)
+        (run_dir / "trace_t1.jsonl").write_text("")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "continue", str(run_dir),
+            "--agent", ECHO_AGENT,
+        ])
+
+        assert result.exit_code != 0
