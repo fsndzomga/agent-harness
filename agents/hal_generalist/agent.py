@@ -31,6 +31,7 @@ class HALGeneralistAgent(Agent):
             task_id=task_id,
             task_data=task_data,
             model_id=self.model,  # comes from --model flag / HARNESS_MODEL env
+            completion_callback=self.emit_completion,  # usage/cost contract
         )
 
         self.record_tool_use("smolagents_run")

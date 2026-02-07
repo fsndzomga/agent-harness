@@ -348,6 +348,20 @@ def run(
                 method=method,
             ))
         
+        # Count failed tasks (no submission) as incorrect
+        submitted_ids = {s["task_id"] for s in submissions}
+        for r in results:
+            if r.task_id not in submitted_ids:
+                expected = bench._answers.get(r.task_id, "")
+                grade_results.append(GradeResult(
+                    task_id=r.task_id,
+                    passed=False,
+                    score=0.0,
+                    expected=expected,
+                    actual=r.error or "no submission",
+                    method="failed",
+                ))
+
         passed = sum(1 for g in grade_results if g.passed)
         total = len(grade_results)
         score = (100 * passed / total) if total > 0 else 0
@@ -1032,6 +1046,20 @@ def continue_run(
                 actual=submission,
                 method=method,
             ))
+
+        # Count failed tasks (no submission) as incorrect
+        submitted_ids = {s["task_id"] for s in submissions}
+        for r in merged_results_data:
+            if r["task_id"] not in submitted_ids:
+                expected = bench._answers.get(r["task_id"], "")
+                grade_results.append(GradeResult(
+                    task_id=r["task_id"],
+                    passed=False,
+                    score=0.0,
+                    expected=expected,
+                    actual=r.get("error", "no submission"),
+                    method="failed",
+                ))
 
         g_passed = sum(1 for g in grade_results if g.passed)
         g_total = len(grade_results)

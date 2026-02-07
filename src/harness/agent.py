@@ -16,6 +16,18 @@ class Agent:
     Subclass this and implement run_task() to create an agent.
     LLM completions are automatically logged.
     
+    **Completion logging contract:**
+    
+    The harness needs ``type: "completion"`` events in the trace to compute
+    usage/cost.  There are two ways to satisfy this:
+    
+    1. Use ``self.complete()`` — logging is automatic (via the provider).
+    2. Use an external framework (smolagents, langchain, …) and call
+       ``self.emit_completion()`` after each LLM call.
+    
+    If ``run_task()`` finishes without *any* completion events being
+    logged, a warning is printed so the developer notices immediately.
+    
     Metrics tracking is built-in. Use self.metric(), self.increment(), 
     or self.record_tool_use() to track KPIs that get aggregated in run.json.
     
@@ -38,6 +50,7 @@ class Agent:
         self._logger = StdoutLogger()
         self._metrics: dict[str, Any] = {}  # Per-task metrics
         self._tool_sequence: list[str] = []  # Track tool usage order
+        self._completion_count: int = 0  # Tracks completions per task
     
     @property
     def model(self) -> str:
@@ -65,12 +78,22 @@ class Agent:
                 task_id = msg["params"]["task_id"]
                 task_data = msg["params"]["task_data"]
                 
-                # Reset metrics for this task
+                # Reset per-task state
                 self._metrics = {}
                 self._tool_sequence = []
+                self._completion_count = 0
                 
                 try:
                     submission = self.run_task(task_id, task_data)
+                    if self._completion_count == 0 and submission:
+                        print(
+                            "WARNING: No completion events were logged during "
+                            "run_task(). Usage and cost will be zero in "
+                            "run.json. To fix: call self.emit_completion() "
+                            "after each LLM call, or use self.complete() "
+                            "which logs automatically.",
+                            file=sys.stderr, flush=True,
+                        )
                     self._send_result(task_id, submission, msg.get("id"))
                 except Exception as e:
                     self._send_error(str(e), msg.get("id"))
@@ -96,7 +119,8 @@ class Agent:
         """
         Make an LLM completion request.
         
-        The request and response are automatically logged.
+        The request and response are automatically logged via the provider's
+        ``BaseProvider.complete()`` wrapper.
         
         Args:
             messages: List of Message objects
@@ -105,8 +129,73 @@ class Agent:
         Returns:
             CompletionResponse with the model's response
         """
+        self._completion_count += 1
         request = CompletionRequest(messages=messages, **kwargs)
         return self.provider.complete(request)
+    
+    def emit_completion(
+        self,
+        model: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: int = 0,
+        provider: str = "external",
+        raw_request: dict | None = None,
+        raw_response: dict | None = None,
+    ) -> None:
+        """Emit a completion event for usage/cost tracking.
+        
+        **Call this for every LLM completion** when your agent uses an
+        external framework (smolagents, langchain, crewai, …) instead of
+        ``self.complete()``.
+        
+        The harness derives all usage and cost metrics from ``completion``
+        trace events.  If none are emitted, ``run.json`` will show zeros.
+        
+        Args:
+            model: Model identifier (e.g. ``"openrouter/deepseek/deepseek-chat-v3-0324"``)
+            input_tokens: Prompt / input token count
+            output_tokens: Completion / output token count
+            cost_usd: Cost for this single completion (if known)
+            latency_ms: Request latency in milliseconds
+            provider: Provider name for attribution (e.g. ``"litellm/openrouter"``)
+            raw_request: Full request dict (optional, for debugging)
+            raw_response: Full response dict (optional, for debugging)
+        
+        Example::
+        
+            class MyLangchainAgent(Agent):
+                def run_task(self, task_id, task_data):
+                    result = my_chain.invoke(task_data["question"])
+                    # Report tokens so the harness can track usage
+                    self.emit_completion(
+                        model="gpt-4o",
+                        input_tokens=result.usage.prompt_tokens,
+                        output_tokens=result.usage.completion_tokens,
+                    )
+                    return result.content
+        """
+        self._completion_count += 1
+        
+        response = dict(raw_response) if raw_response else {}
+        if "usage" not in response:
+            response["usage"] = {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            }
+        if cost_usd and "_cost_usd" not in response:
+            response["_cost_usd"] = cost_usd
+        
+        request = raw_request or {"model": model}
+        
+        self._logger.log_completion(
+            provider=provider,
+            request=request,
+            response=response,
+            latency_ms=latency_ms,
+        )
     
     def log(self, event_type: str = "info", **data: Any) -> None:
         """

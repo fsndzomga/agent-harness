@@ -3,16 +3,19 @@
 import time
 from typing import TYPE_CHECKING
 
-from .base import Provider, Message, CompletionRequest, CompletionResponse, Usage
+from .base import BaseProvider, Message, CompletionRequest, CompletionResponse, Usage
 
 if TYPE_CHECKING:
     from ..logging import TraceLogger, StdoutLogger
 
 
-class LiteLLMProvider(Provider):
+class LiteLLMProvider(BaseProvider):
     """
     Provider using LiteLLM for broad model support.
     
+    Extends ``BaseProvider`` so completion logging is automatic — the base
+    ``complete()`` wraps ``_do_complete()`` and logs every call.
+
     LiteLLM auto-detects provider from model string:
     - "claude-sonnet-4-5-20250514" -> Anthropic
     - "gpt-4o" -> OpenAI
@@ -25,8 +28,7 @@ class LiteLLMProvider(Provider):
         model: str,
         logger: "TraceLogger | StdoutLogger | None" = None,
     ):
-        self.model = model
-        self.logger = logger
+        super().__init__(model, logger)
         self._litellm = None
     
     @property
@@ -45,8 +47,11 @@ class LiteLLMProvider(Provider):
                 )
         return self._litellm
     
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
-        """Make a completion request via LiteLLM."""
+    def _do_complete(self, request: CompletionRequest) -> CompletionResponse:
+        """Make a completion request via LiteLLM.
+
+        Logging is handled by ``BaseProvider.complete()`` — do NOT log here.
+        """
         
         # Build raw request
         raw_request = {
@@ -95,7 +100,7 @@ class LiteLLMProvider(Provider):
         
         provider_name = f"litellm/{self._get_provider()}"
         
-        result = CompletionResponse(
+        return CompletionResponse(
             message=message,
             usage=usage,
             raw_request=raw_request,
@@ -104,17 +109,6 @@ class LiteLLMProvider(Provider):
             latency_ms=latency_ms,
             model=self.model,
         )
-        
-        # Auto-log if logger configured
-        if self.logger:
-            self.logger.log_completion(
-                provider=provider_name,
-                request=raw_request,
-                response=raw_response,
-                latency_ms=latency_ms,
-            )
-        
-        return result
     
     def _get_provider(self) -> str:
         """Detect underlying provider from model string."""
