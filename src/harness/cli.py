@@ -170,9 +170,8 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
 @click.option("--task-timeout", default=300, help="Timeout per task in seconds")
 @click.option("--num-tasks", "-n", type=int, help="Limit number of tasks")
 @click.option("--model", "-m", help="Model to use (sets HARNESS_MODEL env var)")
-@click.option("--grader", "-g", default="default", 
-              type=click.Choice(["exact", "normalized", "numeric", "contains", "fuzzy", "strict", "default", "llm", "llm-fallback"]),
-              help="Grader to use: exact, normalized, numeric, contains, fuzzy, strict, default (all), llm, llm-fallback")
+@click.option("--grader", "-g", default="default",
+              help="Grader(s) to use, comma-separated. Built-in: exact, normalized, numeric, contains, fuzzy, strict, default, llm, llm-fallback")
 @click.option("--grader-model", help="Model for LLM-as-judge grader (defaults to --model)")
 def run(
     agent: str,
@@ -294,92 +293,39 @@ def run(
     click.echo(f"\nCompleted: {success}/{len(results)} succeeded, {failed} failed")
     
     # Grade if benchmark has grader
+    grade_results_multi = None
     if bench and hasattr(bench, 'grade'):
-        click.echo(f"\nGrading with '{grader}' grader...")
-        
-        # Custom grading based on --grader option
-        from .benchmarks.graders import (
-            get_grader_preset, 
-            grade_with_pipeline, 
-            grade_with_llm_fallback,
-            LLMJudge,
+        from .benchmarks.graders import resolve_graders as _resolve_graders
+        from .grading import (
+            run_graders, save_grades,
+            build_submissions_from_results,
         )
-        from .benchmarks.base import GradeResult
-        
-        grade_results = []
-        submissions = [
-            {"task_id": r.task_id, "submission": r.submission}
-            for r in results
-            if r.submission is not None
-        ]
-        
-        # Get task data for LLM judge context
-        task_data_map = {t.id: t.data for t in task_list}
-        
-        for sub in submissions:
-            task_id = sub["task_id"]
-            submission = sub["submission"]
-            
-            # Get expected answer from benchmark
-            expected = bench._answers.get(task_id, "")
-            question = task_data_map.get(task_id, {}).get("question", "")
-            
-            if grader == "llm":
-                # Pure LLM-as-judge
-                judge = LLMJudge(model=grader_model or model)
-                passed, method, _ = judge.grade(submission, expected, question)
-            elif grader == "llm-fallback":
-                # Deterministic first, then LLM fallback
-                passed, method = grade_with_llm_fallback(
-                    submission, expected, question, 
-                    llm_model=grader_model or model
-                )
-            else:
-                # Deterministic graders
-                graders_list = get_grader_preset(grader)
-                passed, method = grade_with_pipeline(submission, expected, graders_list)
-            
-            grade_results.append(GradeResult(
-                task_id=task_id,
-                passed=passed,
-                score=1.0 if passed else 0.0,
-                expected=expected,
-                actual=submission,
-                method=method,
-            ))
-        
-        # Count failed tasks (no submission) as incorrect
-        submitted_ids = {s["task_id"] for s in submissions}
-        for r in results:
-            if r.task_id not in submitted_ids:
-                expected = bench._answers.get(r.task_id, "")
-                grade_results.append(GradeResult(
-                    task_id=r.task_id,
-                    passed=False,
-                    score=0.0,
-                    expected=expected,
-                    actual=r.error or "no submission",
-                    method="failed",
-                ))
 
-        passed = sum(1 for g in grade_results if g.passed)
-        total = len(grade_results)
-        score = (100 * passed / total) if total > 0 else 0
-        click.echo(f"Score: {passed}/{total} ({score:.1f}%)")
-        
-        # Save grades
+        grader_instances = _resolve_graders(
+            grader, model=grader_model or model,
+        )
+        grader_names = ", ".join(g.name for g in grader_instances)
+        click.echo(f"\nGrading with: {grader_names}")
+
+        task_data_map = {t.id: t.data for t in task_list}
+        submissions, failed_tasks = build_submissions_from_results(
+            results, bench, task_data_map,
+        )
+
+        grade_results_multi = run_graders(
+            grader_instances, submissions, failed_tasks,
+        )
+
+        # Print per-grader scores
+        for gname, glist in grade_results_multi.items():
+            g_passed = sum(1 for g in glist if g.passed)
+            g_total = len(glist)
+            g_score = (100 * g_passed / g_total) if g_total > 0 else 0
+            click.echo(f"  [{gname}] {g_passed}/{g_total} ({g_score:.1f}%)")
+
+        # Save grades (multi-grader format)
         grades_path = output_dir / "grades.json"
-        grades_path.write_text(json.dumps([
-            {
-                "task_id": g.task_id,
-                "passed": g.passed,
-                "score": g.score,
-                "expected": g.expected,
-                "actual": g.actual,
-                "method": g.method,
-            }
-            for g in grade_results
-        ], indent=2))
+        save_grades(grades_path, grade_results_multi)
         click.echo(f"Grades: {grades_path}")
     
     # Save summary
@@ -422,13 +368,10 @@ def run(
         "run_command": " ".join(sys.argv),
     }
     
-    # Get grade results if available
-    grade_results_for_run = grade_results if bench and hasattr(bench, 'grade') else None
-    
     run_metadata = aggregate_run_stats(
         output_dir=output_dir,
         results=results,
-        grade_results=grade_results_for_run,
+        grade_results_multi=grade_results_multi,
         config=run_config,
     )
     run_metadata.duration_seconds = sum(r.duration_ms or 0 for r in results) / 1000
@@ -504,21 +447,25 @@ def view(path: str):
     click.echo(f"Model: {summary.get('model', 'unknown')}")
     click.echo(f"Total: {summary['total']}, Success: {summary['success']}, Failed: {summary['failed']}")
     
-    # Load grades if available
+    # Load grades if available (multi-grader aware)
     grades_path = path / "grades.json" if path.is_dir() else path.parent / "grades.json"
     if grades_path.exists():
-        grades = json.loads(grades_path.read_text())
-        passed = sum(1 for g in grades if g["passed"])
-        click.echo(f"Score: {passed}/{len(grades)} ({100*passed/len(grades):.1f}%)")
-        
-        # Show failures
-        failures = [g for g in grades if not g["passed"]]
-        if failures:
-            click.echo(f"\nFailed tasks ({len(failures)}):")
-            for g in failures[:10]:  # Show first 10
-                click.echo(f"  {g['task_id']}: expected '{g['expected']}', got '{g['actual']}'")
-            if len(failures) > 10:
-                click.echo(f"  ... and {len(failures) - 10} more")
+        from .grading import load_grades_raw
+        grades_data = load_grades_raw(grades_path)
+
+        for grader_name, grades in grades_data.items():
+            passed = sum(1 for g in grades if g["passed"])
+            total = len(grades)
+            score = (100 * passed / total) if total > 0 else 0
+            click.echo(f"[{grader_name}] Score: {passed}/{total} ({score:.1f}%)")
+
+            failures = [g for g in grades if not g["passed"]]
+            if failures:
+                click.echo(f"  Failed ({len(failures)}):")
+                for g in failures[:10]:
+                    click.echo(f"    {g['task_id']}: expected '{g.get('expected', '?')}', got '{g.get('actual', '?')}'")
+                if len(failures) > 10:
+                    click.echo(f"    ... and {len(failures) - 10} more")
 
 
 def _is_run_dir(d: Path) -> bool:
@@ -999,86 +946,37 @@ def continue_run(
     total_failed = len(merged_results_data) - total_success
 
     # Grade all submissions (not just the retried ones)
-    grade_results = None
+    grade_results_multi = None
     if benchmark_name and bench and hasattr(bench, 'grade'):
-        click.echo(f"\nGrading with '{eff_grader}' grader...")
-
-        from .benchmarks.graders import (
-            get_grader_preset,
-            grade_with_pipeline,
-            grade_with_llm_fallback,
-            LLMJudge,
+        from .benchmarks.graders import resolve_graders as _resolve_graders
+        from .grading import (
+            run_graders, save_grades,
+            build_submissions_from_merged,
         )
-        from .benchmarks.base import GradeResult
 
-        grade_results = []
-        submissions = [
-            {"task_id": r["task_id"], "submission": r["submission"]}
-            for r in merged_results_data
-            if r.get("submission") is not None
-        ]
+        grader_instances = _resolve_graders(
+            eff_grader, model=eff_grader_model or eff_model,
+        )
+        grader_names = ", ".join(g.name for g in grader_instances)
+        click.echo(f"\nGrading with: {grader_names}")
 
         task_data_map = {t.id: t.data for t in all_tasks}
+        submissions, failed_tasks = build_submissions_from_merged(
+            merged_results_data, bench, task_data_map,
+        )
 
-        for sub in submissions:
-            task_id = sub["task_id"]
-            submission = sub["submission"]
-            expected = bench._answers.get(task_id, "")
-            question = task_data_map.get(task_id, {}).get("question", "")
+        grade_results_multi = run_graders(
+            grader_instances, submissions, failed_tasks,
+        )
 
-            if eff_grader == "llm":
-                judge = LLMJudge(model=eff_grader_model or eff_model)
-                passed, method, _ = judge.grade(submission, expected, question)
-            elif eff_grader == "llm-fallback":
-                passed, method = grade_with_llm_fallback(
-                    submission, expected, question,
-                    llm_model=eff_grader_model or eff_model,
-                )
-            else:
-                graders_list = get_grader_preset(eff_grader)
-                passed, method = grade_with_pipeline(submission, expected, graders_list)
+        for gname, glist in grade_results_multi.items():
+            g_passed = sum(1 for g in glist if g.passed)
+            g_total = len(glist)
+            g_score = (100 * g_passed / g_total) if g_total > 0 else 0
+            click.echo(f"  [{gname}] {g_passed}/{g_total} ({g_score:.1f}%)")
 
-            grade_results.append(GradeResult(
-                task_id=task_id,
-                passed=passed,
-                score=1.0 if passed else 0.0,
-                expected=expected,
-                actual=submission,
-                method=method,
-            ))
-
-        # Count failed tasks (no submission) as incorrect
-        submitted_ids = {s["task_id"] for s in submissions}
-        for r in merged_results_data:
-            if r["task_id"] not in submitted_ids:
-                expected = bench._answers.get(r["task_id"], "")
-                grade_results.append(GradeResult(
-                    task_id=r["task_id"],
-                    passed=False,
-                    score=0.0,
-                    expected=expected,
-                    actual=r.get("error", "no submission"),
-                    method="failed",
-                ))
-
-        g_passed = sum(1 for g in grade_results if g.passed)
-        g_total = len(grade_results)
-        g_score = (100 * g_passed / g_total) if g_total > 0 else 0
-        click.echo(f"Score: {g_passed}/{g_total} ({g_score:.1f}%)")
-
-        # Save grades
         grades_path = run_dir / "grades.json"
-        grades_path.write_text(json.dumps([
-            {
-                "task_id": g.task_id,
-                "passed": g.passed,
-                "score": g.score,
-                "expected": g.expected,
-                "actual": g.actual,
-                "method": g.method,
-            }
-            for g in grade_results
-        ], indent=2))
+        save_grades(grades_path, grade_results_multi)
         click.echo(f"Grades: {grades_path}")
 
     # Save updated summary
@@ -1126,7 +1024,7 @@ def continue_run(
     run_metadata = aggregate_run_stats(
         output_dir=run_dir,
         results=all_task_results,
-        grade_results=grade_results,
+        grade_results_multi=grade_results_multi,
         config=run_config,
     )
     run_metadata.duration_seconds = sum(r.get("duration_ms", 0) for r in merged_results_data) / 1000
@@ -1161,6 +1059,122 @@ def continue_run(
         still_errored = [r.task_id for r in new_results if r.status != "success"]
         click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored[:10])}"
                    + (f" (and {len(still_errored) - 10} more)" if len(still_errored) > 10 else ""))
+
+
+@cli.command("grade")
+@click.argument("run_id")
+@click.option("--grader", "-g", required=True,
+              help="Grader(s) to run, comma-separated. Built-in: exact, normalized, numeric, contains, fuzzy, strict, default, llm, llm-fallback")
+@click.option("--grader-model", help="Model for LLM-as-judge grader")
+@click.option("--model", "-m", help="Alias for --grader-model")
+@click.option("--output", "-o", type=click.Path(), default="./results", help="Base results directory")
+@click.option("--benchmark", "-b", type=str, help="Override benchmark (if not in run config)")
+def grade_run(
+    run_id: str,
+    grader: str,
+    grader_model: str | None,
+    model: str | None,
+    output: str,
+    benchmark: str | None,
+):
+    """Run grader(s) on an existing run and add scores to run.json.
+
+    This is the post-hoc grading command.  It loads submissions from the
+    existing run, applies the requested grader(s), and **merges** the new
+    scores into ``run.json`` and ``grades.json`` alongside any previous
+    grader results — nothing is overwritten.
+
+    \b
+    Examples:
+        harness grade f7e3ae --grader llm
+        harness grade f7e3ae --grader exact,llm --grader-model openrouter/deepseek/deepseek-chat-v3-0324
+        harness grade ./results/gaia/my_run/ --grader llm-fallback
+    """
+    from .benchmarks.graders import resolve_graders as _resolve_graders
+    from .grading import (
+        run_graders, save_grades, load_grades_raw,
+        build_submissions_from_merged, patch_run_json_scores,
+    )
+
+    results_base = Path(output)
+    run_dir = find_run_dir(run_id, results_base)
+    if run_dir is None:
+        click.echo(f"Could not find run directory for '{run_id}' under {results_base}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Found run: {run_dir}")
+
+    # Recover run state to get benchmark name and submissions
+    run_data = recover_run_state(run_dir)
+    benchmark_name = benchmark or run_data.get("benchmark")
+    eff_grader_model = grader_model or model or run_data.get("model")
+
+    if not benchmark_name:
+        click.echo("Cannot grade: no benchmark specified. Use --benchmark to supply one.", err=True)
+        raise SystemExit(1)
+
+    # Load benchmark for expected answers
+    from .benchmarks.registry import get_benchmark
+    bench = get_benchmark(benchmark_name)
+
+    if not hasattr(bench, 'grade'):
+        click.echo(f"Benchmark '{benchmark_name}' does not support grading.", err=True)
+        raise SystemExit(1)
+
+    all_tasks = bench.get_tasks()
+    task_data_map = {t.id: t.data for t in all_tasks}
+
+    # Get submissions from run state
+    run_results = run_data.get("results", [])
+    if not run_results:
+        # Try summary.json
+        summary_path = run_dir / "summary.json"
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text())
+            run_results = summary.get("results", [])
+
+    if not run_results:
+        click.echo("No task results found in this run.", err=True)
+        raise SystemExit(1)
+
+    submissions, failed_tasks = build_submissions_from_merged(
+        run_results, bench, task_data_map,
+    )
+
+    if not submissions and not failed_tasks:
+        click.echo("No submissions to grade.", err=True)
+        raise SystemExit(1)
+
+    # Resolve and run graders
+    grader_instances = _resolve_graders(grader, model=eff_grader_model)
+    grader_names = ", ".join(g.name for g in grader_instances)
+    click.echo(f"Grading with: {grader_names}")
+
+    grade_results_multi = run_graders(
+        grader_instances, submissions, failed_tasks,
+    )
+
+    # Print per-grader scores
+    for gname, glist in grade_results_multi.items():
+        g_passed = sum(1 for g in glist if g.passed)
+        g_total = len(glist)
+        g_score = (100 * g_passed / g_total) if g_total > 0 else 0
+        click.echo(f"  [{gname}] {g_passed}/{g_total} ({g_score:.1f}%)")
+
+    # Merge into grades.json
+    grades_path = run_dir / "grades.json"
+    save_grades(grades_path, grade_results_multi, merge=True)
+    click.echo(f"Grades: {grades_path}")
+
+    # Merge into run.json scores
+    run_json_path = run_dir / "run.json"
+    if run_json_path.exists():
+        patch_run_json_scores(run_json_path, grade_results_multi, merge=True)
+        click.echo(f"Run: {run_json_path}")
+    else:
+        click.echo("Warning: run.json not found — scores not added to run metadata.", err=True)
+
+    click.echo("Done.")
 
 
 DEFAULT_HF_REPO = "fsndzomga/agent-harness-runs"

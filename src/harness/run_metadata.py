@@ -149,7 +149,11 @@ class RunMetadata:
     completed_task_ids: list[str] = field(default_factory=list)  # Tasks that executed successfully
     error_task_ids: list[str] = field(default_factory=list)  # Tasks that crashed/timed out
     
-    # Grading results (what most people care about)
+    # Grading results — multi-grader scores
+    # ``scores`` is the canonical store: {grader_name: {score, passed, total, ...}}
+    scores: dict[str, dict] = field(default_factory=dict)
+    
+    # Legacy / backward-compat fields (populated from the *first* grader)
     score: float = 0.0
     passed: int = 0
     total_graded: int = 0
@@ -483,7 +487,8 @@ def aggregate_agent_metrics(metrics_list: list[dict]) -> dict:
 def aggregate_run_stats(
     output_dir: Path,
     results: list[Any],  # TaskResult objects
-    grade_results: list[Any] | None = None,  # GradeResult objects
+    grade_results: list[Any] | None = None,  # GradeResult objects (legacy single-grader)
+    grade_results_multi: dict[str, list[Any]] | None = None,  # {grader_name: [GradeResult]}
     config: dict | None = None,
 ) -> RunMetadata:
     """
@@ -492,7 +497,8 @@ def aggregate_run_stats(
     Args:
         output_dir: Directory containing trace files
         results: List of TaskResult objects from the run
-        grade_results: Optional list of GradeResult objects
+        grade_results: Optional list of GradeResult objects (single grader, legacy)
+        grade_results_multi: Optional dict of grader_name → [GradeResult] (multi-grader)
         config: Run configuration dict
     """
     config = config or {}
@@ -590,17 +596,51 @@ def aggregate_run_stats(
         }
         run.cost_by_model[model_name] = ms.cost_usd
     
-    # Aggregate grading results
-    if grade_results:
-        run.total_graded = len(grade_results)
-        for g in grade_results:
+    # Aggregate grading results (multi-grader aware)
+    #
+    # Three paths depending on what the caller passed:
+    #   1. grade_results_multi  – new multi-grader dict {name: [GradeResult]}
+    #   2. grade_results        – legacy single-grader list [GradeResult]
+    #   3. neither              – no grading
+    all_grades: dict[str, list] = {}
+    if grade_results_multi:
+        all_grades = grade_results_multi
+    elif grade_results:
+        # Wrap legacy single list under the grader name from config
+        grader_name = config.get("grader", "default")
+        all_grades = {grader_name: grade_results}
+
+    first_grader_done = False
+    for grader_name, glist in all_grades.items():
+        g_passed_ids: list[str] = []
+        g_failed_ids: list[str] = []
+        g_passed = 0
+        g_total = len(glist)
+        for g in glist:
             if g.passed:
-                run.passed += 1
-                run.passed_task_ids.append(g.task_id)
+                g_passed += 1
+                g_passed_ids.append(g.task_id)
             else:
-                run.failed_task_ids.append(g.task_id)
-        if run.total_graded > 0:
-            run.score = 100 * run.passed / run.total_graded
+                g_failed_ids.append(g.task_id)
+        g_score = (100 * g_passed / g_total) if g_total > 0 else 0.0
+
+        run.scores[grader_name] = {
+            "grader": grader_name,
+            "score": g_score,
+            "passed": g_passed,
+            "total": g_total,
+            "passed_task_ids": g_passed_ids,
+            "failed_task_ids": g_failed_ids,
+        }
+
+        # Populate legacy flat fields from the FIRST grader for backward compat
+        if not first_grader_done:
+            run.score = g_score
+            run.passed = g_passed
+            run.total_graded = g_total
+            run.passed_task_ids = g_passed_ids
+            run.failed_task_ids = g_failed_ids
+            first_grader_done = True
     
     # Aggregate agent metrics across all tasks
     run.agent_metrics = aggregate_agent_metrics([t.metrics for t in run.task_stats if t.metrics])

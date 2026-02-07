@@ -271,11 +271,15 @@ class TestContinueIntegration:
         # Old error trace should be replaced
         assert "task_error" not in content or "task_complete" in content
 
-        # Verify grades.json was created
+        # Verify grades.json was created (multi-grader format)
         grades_path = run_dir / "grades.json"
         assert grades_path.exists()
         grades = json.loads(grades_path.read_text())
-        assert len(grades) == 2  # Both tasks graded
+        # New format: dict of grader_name -> list
+        assert isinstance(grades, dict)
+        # Should have at least one grader key
+        first_key = next(iter(grades))
+        assert len(grades[first_key]) == 2  # Both tasks graded
 
     def test_continue_preserves_successful_results(self, tmp_path):
         """Previously successful tasks are preserved in the merged output."""
