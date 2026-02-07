@@ -80,10 +80,22 @@ class AgentRunner:
             ("agent", []),  # Compiled binary
             ("__main__.py", ["python"]),
         ]
+
+        # If the agent directory contains a virtual environment, use its
+        # Python interpreter instead of the system "python" for .py entries.
+        venv_python = None
+        for venv_name in (".venv", "venv"):
+            candidate = p / venv_name / "bin" / "python"
+            if candidate.exists():
+                venv_python = str(candidate)
+                break
         
         for filename, cmd in entry_points:
             entry = p / filename
             if entry.exists():
+                # Swap bare "python" for the venv python when available
+                if venv_python and cmd == ["python"]:
+                    return [venv_python, str(entry)]
                 if cmd:
                     return cmd + [str(entry)]
                 else:
