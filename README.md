@@ -11,7 +11,8 @@ A local-first, lightweight harness for AI agent evaluations.
 - **Layered grading**: Exact → normalized → numeric → fuzzy matching, with LLM-as-judge support.
 - **Run metadata**: Comprehensive `run.json` with token usage, costs, latencies, and custom agent metrics.
 - **Agent metrics**: Track custom KPIs (steps, tool usage, etc.) that get aggregated across runs.
-- **Benchmark plugins**: Built-in support for GAIA, with more coming.
+- **Benchmark plugins**: Built-in support for GAIA and Terminal-Bench, with more coming.
+- **Container-graded tasks**: Terminal-Bench integration with Docker-based task environments and automatic test-suite grading.
 
 ## Quick Start
 
@@ -212,6 +213,8 @@ ln -s ../../.venv-hal agents/hal_generalist/.venv
 - `arithmetic` - Simple arithmetic problems (built-in, no dependencies)
 - `gaia` - GAIA benchmark (requires `datasets` package)
 - `gaia-level1`, `gaia-level2`, `gaia-level3` - GAIA by difficulty level
+- `terminal-bench` - Terminal-Bench tasks (requires `terminal-bench` + Docker)
+- `terminal-bench-core` - Terminal-Bench core dataset
 
 ```bash
 # List available benchmarks
@@ -221,6 +224,87 @@ harness benchmarks
 pip install datasets  # If not installed
 harness run --agent ./my_agent --benchmark gaia-level1 --output ./results
 ```
+
+### Terminal-Bench
+
+[Terminal-Bench](https://github.com/terminal-bench/terminal-bench) evaluates agents on real-world terminal/DevOps tasks inside Docker containers. Unlike GAIA (where grading compares a string answer), Terminal-Bench grades by running a **test suite inside the container** after the agent finishes.
+
+Each task provides:
+- An **instruction** (what to accomplish)
+- A **Docker environment** (`docker-compose.yaml`)
+- A **test suite** (`run-tests.sh` + `tests/`) that checks the final container state
+
+**Requirements**: `pip install terminal-bench` + a running Docker daemon.
+
+```bash
+# Install terminal-bench
+pip install terminal-bench
+
+# Run 3 easy tasks with the built-in terminal agent
+harness run \
+    --agent agents/terminal_agent.py \
+    --benchmark terminal-bench \
+    --dataset-name terminal-bench-core \
+    --dataset-version 0.1.1 \
+    --difficulty easy \
+    --num-tasks 3 \
+    --model openrouter/deepseek/deepseek-chat-v3-0324 \
+    --task-timeout 600 \
+    --parallel 1
+
+# Run from a local dataset directory
+harness run \
+    --agent agents/terminal_agent.py \
+    --benchmark terminal-bench \
+    --dataset-path /path/to/local/tasks \
+    --model openrouter/deepseek/deepseek-chat-v3-0324
+
+# Run the full core dataset
+harness run \
+    --agent agents/terminal_agent.py \
+    --benchmark terminal-bench-core \
+    --model openrouter/deepseek/deepseek-chat-v3-0324 \
+    --task-timeout 3600 \
+    --parallel 2
+```
+
+#### Terminal-Bench CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--dataset-name` | Dataset name in the TB registry (e.g. `terminal-bench-core`) |
+| `--dataset-version` | Dataset version tag (e.g. `0.1.1`) |
+| `--dataset-path` | Local path to a dataset directory (overrides name/version) |
+| `--difficulty` | Filter tasks by difficulty: `easy`, `medium`, `hard` |
+
+#### Terminal Agent
+
+The built-in `terminal_agent.py` drives an LLM-in-the-loop shell interaction:
+
+1. Starts a Docker container for each task
+2. Captures an initial environment snapshot (`pwd`, `ls -la`)
+3. Runs an LLM loop where the model issues one command at a time
+4. Runs the task's test suite inside the container
+5. Returns `PASS`/`FAIL` as the submission
+
+Configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TB_MAX_ITERATIONS` | `30` | Maximum command iterations per task |
+| `TB_COMMAND_TIMEOUT` | `120` | Per-command timeout in seconds |
+| `TB_TEST_TIMEOUT` | `120` | Test suite timeout in seconds |
+
+#### How Container Grading Works
+
+Unlike string-comparison benchmarks, Terminal-Bench grading is **state-based**:
+
+1. The agent interacts with a Docker container via shell commands
+2. When done, the harness copies `run-tests.sh` + `tests/` into the container
+3. The test suite runs inside the container and checks the final state
+4. The pytest output is parsed to determine pass/fail
+
+This means the agent's "submission" is the container state itself — the `PASS`/`FAIL` string is just a signal for the harness grading pipeline.
 
 ### Adding Benchmarks
 
@@ -541,6 +625,17 @@ harness run \
     --model gpt-4o \
     --grader llm-fallback
 
+# Run Terminal-Bench easy tasks
+harness run \
+    --agent agents/terminal_agent.py \
+    --benchmark terminal-bench \
+    --dataset-name terminal-bench-core \
+    --dataset-version 0.1.1 \
+    --difficulty easy \
+    --model openrouter/deepseek/deepseek-chat-v3-0324 \
+    --task-timeout 600 \
+    --parallel 1
+
 # List benchmarks
 harness benchmarks
 
@@ -600,6 +695,7 @@ poetry run harness run-one \
 - [x] **HuggingFace integration**: Create HF dataset repo to store `run.json` files
 - [x] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
 - [x] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
+- [x] **Terminal-Bench integration**: Container-graded terminal tasks with Docker+tmux, LLM-in-the-loop terminal agent
 
 ### Future
 
