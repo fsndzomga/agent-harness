@@ -77,3 +77,14 @@ def _ensure_registered():
         _BENCHMARKS["gaia-level3"] = GAIALevel3Benchmark
     except ImportError:
         pass  # datasets not installed, GAIA not available
+
+    # Terminal-Bench (requires terminal-bench + Docker)
+    try:
+        from .terminal_bench import (
+            TerminalBenchBenchmark,
+            TerminalBenchCoreBenchmark,
+        )
+        _BENCHMARKS["terminal-bench"] = TerminalBenchBenchmark
+        _BENCHMARKS["terminal-bench-core"] = TerminalBenchCoreBenchmark
+    except ImportError:
+        pass  # terminal-bench not installed

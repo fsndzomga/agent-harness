@@ -161,7 +161,7 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
 
 @cli.command("run")
 @click.option("--agent", required=True, help="Path to agent (file, directory, or name in agents/)")
-@click.option("--benchmark", "-b", help="Benchmark name (e.g., 'arithmetic', 'gaia')")
+@click.option("--benchmark", "-b", help="Benchmark name (e.g., 'arithmetic', 'gaia', 'terminal-bench')")
 @click.option("--tasks-file", type=click.Path(exists=True), help="JSONL file with tasks (alternative to --benchmark)")
 @click.option("--output", "-o", type=click.Path(), default="./results", help="Base output directory (default: ./results)")
 @click.option("--run-id", help="Custom run ID (default: auto-generated)")
@@ -173,6 +173,10 @@ def run_one(agent: str, task: str, timeout: int, output: str | None):
 @click.option("--grader", "-g", default="default",
               help="Grader(s) to use, comma-separated. Built-in: exact, normalized, numeric, contains, fuzzy, strict, default, llm, llm-fallback")
 @click.option("--grader-model", help="Model for LLM-as-judge grader (defaults to --model)")
+@click.option("--dataset-name", help="Dataset name (for terminal-bench: e.g. 'core')")
+@click.option("--dataset-version", help="Dataset version (for terminal-bench: e.g. 'v0.1.0')")
+@click.option("--dataset-path", type=click.Path(exists=True), help="Local dataset path (for terminal-bench)")
+@click.option("--difficulty", help="Filter by difficulty (for terminal-bench: easy, medium, hard)")
 def run(
     agent: str,
     benchmark: str | None,
@@ -186,6 +190,10 @@ def run(
     model: str | None,
     grader: str,
     grader_model: str | None,
+    dataset_name: str | None,
+    dataset_version: str | None,
+    dataset_path: str | None,
+    difficulty: str | None,
 ):
     """Run agent on a benchmark or task file."""
     import asyncio
@@ -238,7 +246,19 @@ def run(
         bench = None
     else:
         from .benchmarks.registry import get_benchmark
-        bench = get_benchmark(benchmark)
+
+        # Build benchmark-specific kwargs
+        bench_kwargs: dict = {}
+        if dataset_name:
+            bench_kwargs["dataset_name"] = dataset_name
+        if dataset_version:
+            bench_kwargs["dataset_version"] = dataset_version
+        if dataset_path:
+            bench_kwargs["dataset_path"] = dataset_path
+        if difficulty:
+            bench_kwargs["difficulty"] = difficulty
+
+        bench = get_benchmark(benchmark, **bench_kwargs)
         task_list = bench.get_tasks()
         bench_name = benchmark
     
@@ -267,6 +287,10 @@ def run(
         "num_tasks": num_tasks,
         "total_tasks": len(task_list),
         "task_ids": [t.id for t in task_list],
+        "dataset_name": dataset_name,
+        "dataset_version": dataset_version,
+        "dataset_path": dataset_path,
+        "difficulty": difficulty,
     }, indent=2))
     
     # Run
