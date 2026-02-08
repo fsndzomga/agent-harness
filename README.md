@@ -696,6 +696,7 @@ poetry run harness run-one \
 - [x] **Push to HF**: `harness push <run_id>` - Upload run.json to HuggingFace dataset
 - [x] **HAL Generalist Agent**: Port the [HAL Generalist Agent](https://huggingface.co/spaces/HuggingFaceH4/blogpost-scaling-test-time-compute) GAIA scaffold and run full DeepSeek evaluation
 - [x] **Terminal-Bench integration**: Container-graded terminal tasks with Docker+tmux, LLM-in-the-loop terminal agent
+- [ ] **Full Terminal-Bench run**: DeepSeek V3 (`deepseek-chat-v3-0324`) on the full `terminal-bench-core` dataset via OpenRouter
 
 ### Future
 
