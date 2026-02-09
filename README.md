@@ -4,7 +4,7 @@ A local-first, lightweight harness for AI agent evaluations.
 
 ## Features
 
-- **Local-first**: No Weave API key required. All logs are JSONL files you can inspect directly.
+- **Local-first**: Minimal dependencies, no external logging platform required. All logs are JSONL files you can inspect directly.
 - **Language-agnostic agents**: Write agents in Python, Rust, Go, Node, bash - anything that can do stdin/stdout JSON.
 - **Automatic logging**: Raw LLM API requests/responses are captured automatically - no manual logging code needed.
 - **Parallel execution**: Run tasks in parallel with automatic retry for API errors (429, 5xx, timeouts).
