@@ -11,8 +11,10 @@ A local-first, lightweight harness for AI agent evaluations.
 - **Layered grading**: Exact → normalized → numeric → fuzzy matching, with LLM-as-judge support.
 - **Run metadata**: Comprehensive `run.json` with token usage, costs, latencies, and custom agent metrics.
 - **Agent metrics**: Track custom KPIs (steps, tool usage, etc.) that get aggregated across runs.
-- **Benchmark plugins**: Built-in support for GAIA and Terminal-Bench, with more coming.
+- **Benchmark plugins**: Built-in support for Arithmetic, GAIA, Terminal-Bench, AssistantBench, HLE, ARC-AGI, and BrowseComp.
+- **Unified architecture**: Every benchmark declares an execution mode (DIRECT, INTERACTIVE, CODE_SUBMIT, etc.) with a consistent `grade(task, result, context)` interface.
 - **Container-graded tasks**: Terminal-Bench integration with Docker-based task environments and automatic test-suite grading.
+- **CI pipeline**: GitHub Actions runs unit tests on every PR to prevent regressions.
 
 ## Quick Start
 
@@ -210,11 +212,15 @@ ln -s ../../.venv-hal agents/hal_generalist/.venv
 
 ### Available Benchmarks
 
-- `arithmetic` - Simple arithmetic problems (built-in, no dependencies)
-- `gaia` - GAIA benchmark (requires `datasets` package)
-- `gaia-level1`, `gaia-level2`, `gaia-level3` - GAIA by difficulty level
-- `terminal-bench` - Terminal-Bench tasks (requires `terminal-bench` + Docker)
-- `terminal-bench-core` - Terminal-Bench core dataset
+| Benchmark | Mode | Status | Requirements |
+|-----------|------|--------|--------------|
+| `arithmetic` | DIRECT | Fully implemented | None |
+| `gaia`, `gaia-level1`..`3` | DIRECT | Fully implemented | `datasets` |
+| `terminal-bench`, `terminal-bench-core` | INTERACTIVE | Fully implemented | `terminal-bench` + Docker |
+| `assistant-bench` | DIRECT | Stub (registered) | `datasets` |
+| `hle` | DIRECT | Stub (registered) | `datasets` |
+| `arc-agi`, `arc-agi-1`, `arc-agi-2` | DIRECT | Grading implemented | `datasets` |
+| `browsecomp` | DIRECT | Stub (registered) | `datasets` |
 
 ```bash
 # List available benchmarks
@@ -311,28 +317,32 @@ This means the agent's "submission" is the container state itself — the `PASS`
 Create a class that inherits from `Benchmark`:
 
 ```python
-from harness.benchmarks.base import Benchmark, GradeResult
+from harness.benchmarks.base import Benchmark, ExecutionMode, ExecutionContext, GradeResult
 from harness.protocol import Task
 
 class MyBenchmark(Benchmark):
     name = "my-benchmark"
     description = "My custom benchmark"
+    execution_mode = ExecutionMode.DIRECT
     
     def get_tasks(self) -> list[Task]:
         return [Task(id="t1", data={"question": "What is 2+2?"})]
     
-    def grade(self, task_id: str, submission: str) -> GradeResult:
+    def grade(self, task: Task, result: any, context: ExecutionContext) -> GradeResult:
         expected = "4"
-        passed = submission.strip() == expected
+        actual = str(result).strip()
+        passed = actual == expected
         return GradeResult(
-            task_id=task_id,
+            task_id=task.id,
             passed=passed,
             score=1.0 if passed else 0.0,
             expected=expected,
-            actual=submission,
+            actual=actual,
             method="exact" if passed else "none",
         )
 ```
+
+Register it in `benchmarks/registry.py` and it's immediately available via the CLI.
 
 ## Grading
 
@@ -657,11 +667,19 @@ export HARNESS_MODEL="claude-sonnet-4-5-20250514"
 harness run --model gpt-4o ...
 ```
 
-API keys are read from standard environment variables:
+API keys are read from a `.env` file (via `python-dotenv`) or standard environment variables:
+- `OPENROUTER_API_KEY` — Use models via OpenRouter (e.g. `openrouter/deepseek/deepseek-chat-v3-0324`)
 - `ANTHROPIC_API_KEY`
 - `OPENAI_API_KEY`
 - `GOOGLE_API_KEY`
+- `HF_TOKEN` — For downloading datasets from HuggingFace
 - etc. (via LiteLLM)
+
+Copy `.env.example` or create a `.env` file in the project root:
+```bash
+OPENROUTER_API_KEY=sk-or-...
+HF_TOKEN=hf_...
+```
 
 ## Development
 
@@ -669,7 +687,7 @@ API keys are read from standard environment variables:
 # Install with dev dependencies
 poetry install --with dev
 
-# Run tests
+# Run tests (218 tests)
 poetry run pytest
 
 # Run a quick test
@@ -677,6 +695,10 @@ poetry run harness run-one \
     --agent agents/echo_agent.py \
     --task '{"id": "test", "data": {"x": 1}}'
 ```
+
+### CI
+
+GitHub Actions runs the full test suite on every push and PR to `main`. See `.github/workflows/benchmark-smoke.yml`.
 
 ## Roadmap
 
@@ -698,8 +720,17 @@ poetry run harness run-one \
 - [x] **Terminal-Bench integration**: Container-graded terminal tasks with Docker+tmux, LLM-in-the-loop terminal agent
 - [ ] **Full Terminal-Bench run**: DeepSeek V3 (`deepseek-chat-v3-0324`) on the full `terminal-bench-core` dataset via OpenRouter
 
+### Done (P0)
+
+- [x] **Unified benchmark architecture**: ExecutionMode enum, `grade(task, result, context)` signature, TaskOrchestrator, GradingPipeline
+- [x] **New benchmarks registered**: AssistantBench, HLE, ARC-AGI, BrowseComp (stubs ready for dataset wiring)
+- [x] **ARC-AGI grading**: Grid-match logic with multi-attempt support
+- [x] **CI**: GitHub Actions unit tests on every PR
+
 ### Future
 
+- [ ] Wire stub benchmark dataset loaders (AssistantBench, HLE, BrowseComp)
+- [ ] P1-P5 execution modes in orchestrator (CODE_SUBMIT, INTERACTIVE, CONVERSATIONAL, TOOL_USE, GUI_AGENT)
 - [ ] M8: Sandbox tiers (venv, firejail, docker)
 - [ ] M9: Better viewer / dashboard
 - [ ] More benchmarks (SWE-bench, GPQA, etc.)
