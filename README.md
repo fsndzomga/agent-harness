@@ -744,13 +744,12 @@ MIT
 If you use Agent Harness in your research, please cite it:
 
 ```bibtex
-@software{ndzomga2026agentharness,
-  author    = {Ndzomga, Franck},
-  title     = {Agent Harness: A Local-First, Lightweight Harness for AI Agent Evaluations},
-  year      = {2026},
-  url       = {https://github.com/fsndzomga/agent-harness},
-  doi       = {10.5281/zenodo.18568843},
-  version   = {0.1.0}
+@Misc{agentharness,
+  title        = {Agent Harness: A Local-First, Lightweight Harness for AI Agent Evaluations},
+  author       = {Franck Ndzomga},
+  howpublished = {\url{https://github.com/fsndzomga/agent-harness}},
+  doi          = {10.5281/zenodo.18568843},
+  year         = {2026}
 }
 ```
 
