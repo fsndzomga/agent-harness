@@ -19,15 +19,11 @@ A local-first, lightweight harness for AI agent evaluations.
 ## Quick Start
 
 ```bash
-# Install with Poetry
-cd agent-harness
-poetry install
-
-# Or install with pip
-pip install -e .
+# Install from PyPI
+pip install agent-eval-harness
 
 # Set your API key
-export ANTHROPIC_API_KEY="sk-..."
+export OPENROUTER_API_KEY="sk-or-..."
 # or
 export OPENAI_API_KEY="sk-..."
 
