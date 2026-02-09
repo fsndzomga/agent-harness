@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Agent Harness: A Local-First, Lightweight Harness for AI Agent Evaluations"
+version: 0.1.0
+date-released: 2026-02-09
+doi: 10.5281/zenodo.18568843
+url: "https://github.com/fsndzomga/agent-harness"
+repository-code: "https://github.com/fsndzomga/agent-harness"
+license: MIT
+authors:
+  - family-names: Ndzomga
+    given-names: Franck
+keywords:
+  - ai
+  - agents
+  - evaluation
+  - benchmark
+  - llm
+  - harness

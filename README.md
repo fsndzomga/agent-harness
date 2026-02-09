@@ -738,3 +738,20 @@ GitHub Actions runs the full test suite on every push and PR to `main`. See `.gi
 ## License
 
 MIT
+
+## Citing
+
+If you use Agent Harness in your research, please cite it:
+
+```bibtex
+@software{ndzomga2026agentharness,
+  author    = {Ndzomga, Franck},
+  title     = {Agent Harness: A Local-First, Lightweight Harness for AI Agent Evaluations},
+  year      = {2026},
+  url       = {https://github.com/fsndzomga/agent-harness},
+  doi       = {10.5281/zenodo.18568843},
+  version   = {0.1.0}
+}
+```
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18568843.svg)](https://doi.org/10.5281/zenodo.18568843)
