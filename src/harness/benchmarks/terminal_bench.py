@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from ..protocol import Task
-from .base import Benchmark, GradeResult
+from .base import Benchmark, ExecutionMode, ExecutionContext, GradeResult
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ class TerminalBenchBenchmark(Benchmark):
         "Terminal-Bench — real-world terminal tasks graded by "
         "running tests inside Docker containers"
     )
+    execution_mode = ExecutionMode.INTERACTIVE
 
     def __init__(
         self,
@@ -98,7 +99,7 @@ class TerminalBenchBenchmark(Benchmark):
         self._load_dataset()
         return self._tasks  # type: ignore[return-value]
 
-    def grade(self, task_id: str, submission: str) -> GradeResult:
+    def grade(self, task: Task, result: Any, context: ExecutionContext) -> GradeResult:
         """String-comparison grading (fallback).
 
         For Terminal-Bench the *real* grading is container-based via
@@ -107,6 +108,8 @@ class TerminalBenchBenchmark(Benchmark):
         submission that contains "PASS" or comes from ``grade_container``
         as passing.
         """
+        task_id = task.id
+        submission = str(result) if result is not None else ""
         expected = self._answers.get(task_id, "PASS")
 
         # If submission was set by grade_container, it will be "PASS"/"FAIL"

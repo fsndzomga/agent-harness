@@ -88,3 +88,18 @@ def _ensure_registered():
         _BENCHMARKS["terminal-bench-core"] = TerminalBenchCoreBenchmark
     except ImportError:
         pass  # terminal-bench not installed
+
+    # ── P0 DIRECT benchmarks ─────────────────────────────────────
+    from .assistant_bench import AssistantBenchBenchmark
+    _BENCHMARKS["assistant-bench"] = AssistantBenchBenchmark
+
+    from .hle import HLEBenchmark
+    _BENCHMARKS["hle"] = HLEBenchmark
+
+    from .arc_agi import ARCAGIBenchmark, ARCAGI1Benchmark, ARCAGI2Benchmark
+    _BENCHMARKS["arc-agi"] = ARCAGIBenchmark
+    _BENCHMARKS["arc-agi-1"] = ARCAGI1Benchmark
+    _BENCHMARKS["arc-agi-2"] = ARCAGI2Benchmark
+
+    from .browsecomp import BrowseCompBenchmark
+    _BENCHMARKS["browsecomp"] = BrowseCompBenchmark

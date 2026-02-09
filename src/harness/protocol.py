@@ -1,15 +1,25 @@
 """JSON-RPC protocol definitions for agent communication."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 import json
 
 
 @dataclass
 class Task:
-    """A task to be sent to an agent."""
+    """A single benchmark task.
+
+    Core fields (``id``, ``data``) are required.  The optional fields
+    (``execution_mode``, ``environment``, ``metadata``) were added by the
+    v2 architecture.  Existing code that creates ``Task(id=..., data=...)``
+    continues to work unchanged.
+    """
     id: str
     data: dict[str, Any]
+    # v2 fields – optional for backward compatibility
+    execution_mode: Optional[str] = None   # "direct", "interactive", etc.
+    environment: Any = None                # TaskEnvironment (from benchmarks.base)
+    metadata: dict[str, Any] = field(default_factory=dict)
     
     def to_jsonrpc(self) -> str:
         """Format as JSON-RPC request."""
@@ -26,6 +36,8 @@ class Task:
         return cls(
             id=d.get("id", "task_1"),
             data=d.get("data", d),
+            execution_mode=d.get("execution_mode"),
+            metadata=d.get("metadata", {}),
         )
 
 

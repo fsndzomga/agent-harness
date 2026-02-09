@@ -12,8 +12,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .benchmarks.base import GradeResult
-from .benchmarks.graders import Grader, resolve_graders
+from ..benchmarks.base import GradeResult
+from ..benchmarks.graders import Grader, resolve_graders
 
 
 # ============================================================================

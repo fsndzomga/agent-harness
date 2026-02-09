@@ -4,7 +4,7 @@ import random
 from typing import Any
 
 from ..protocol import Task
-from .base import Benchmark, GradeResult
+from .base import Benchmark, ExecutionMode, ExecutionContext, GradeResult
 from .graders import grade_with_pipeline
 
 
@@ -18,6 +18,7 @@ class ArithmeticBenchmark(Benchmark):
     
     name = "arithmetic"
     description = "Simple arithmetic problems for testing"
+    execution_mode = ExecutionMode.DIRECT
     
     def __init__(self, num_tasks: int = 20, seed: int = 42):
         self.num_tasks = num_tasks
@@ -55,7 +56,9 @@ class ArithmeticBenchmark(Benchmark):
         
         return self._tasks
     
-    def grade(self, task_id: str, submission: str) -> GradeResult:
+    def grade(self, task: Task, result: Any, context: ExecutionContext) -> GradeResult:
+        task_id = task.id
+        submission = str(result) if result is not None else ""
         expected = self._answers.get(task_id, "")
         passed, method = grade_with_pipeline(submission, expected)
         

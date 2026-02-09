@@ -15,7 +15,7 @@ from typing import Any
 from pathlib import Path
 
 from ..protocol import Task
-from .base import Benchmark, GradeResult
+from .base import Benchmark, ExecutionMode, ExecutionContext, GradeResult
 from .graders import grade_with_pipeline, exact_match, normalized_match, numeric_match
 
 
@@ -39,6 +39,7 @@ class GAIABenchmark(Benchmark):
     
     name = "gaia"
     description = "General AI Assistants benchmark - real-world questions with tools"
+    execution_mode = ExecutionMode.DIRECT
     
     def __init__(
         self,
@@ -145,7 +146,7 @@ class GAIABenchmark(Benchmark):
         
         return self._tasks
     
-    def grade(self, task_id: str, submission: str) -> GradeResult:
+    def grade(self, task: Task, result: Any, context: ExecutionContext) -> GradeResult:
         """
         Grade using GAIA's official grading approach.
         
@@ -154,6 +155,8 @@ class GAIABenchmark(Benchmark):
         - Lists (order may not matter for some questions)
         - Case insensitivity
         """
+        task_id = task.id
+        submission = str(result) if result is not None else ""
         expected = self._answers.get(task_id, "")
         
         if not expected:
