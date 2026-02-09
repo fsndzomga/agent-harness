@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "agent-harness"
+name = "agent-eval-harness"
 version = "0.1.0"
 description = "A local-first, lightweight harness for AI agent evaluations"
 authors = ["Franck Ndzomga <ndzomgafs@gmail.com>"]
