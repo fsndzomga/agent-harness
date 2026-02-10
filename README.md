@@ -500,6 +500,105 @@ Metrics are aggregated in `run.json`:
 | Dict (counters) | `{name}_totals` (summed per key) |
 | Other | `{name}_values` (unique values) |
 
+## Run Records & Ablation Analysis
+
+The harness provides a `RunRecord` system for flexible agent metadata tracking and ablation analysis. Unlike `RunMetadata` (which captures detailed execution stats), `RunRecord` is a **simple, agent-driven** structure — the harness doesn't interpret metadata, just stores it.
+
+### Philosophy
+
+You can't know in advance what agent configuration knobs matter — for one agent the key variable is the system prompt, for another it's the retrieval chunk size, for another it's whether it uses self-reflection. The harness doesn't impose opinions on what to ablate. Instead, agents self-report whatever metadata they want, and the developer does their own analysis offline.
+
+### RunRecord
+
+```python
+@dataclass
+class RunRecord:
+    run_id: str
+    benchmark: str
+    task_id: str
+    agent_name: str
+    agent_metadata: dict[str, Any]  # Agent self-reports whatever it wants
+    score: float
+    cost_usd: float
+    model_costs: dict[str, float]
+    timestamp: datetime
+```
+
+### Setting Agent Metadata
+
+In a Python agent, use `set_metadata()` to tag your configuration:
+
+```python
+class MyAgent(Agent):
+    def __init__(self):
+        super().__init__()
+        # Tag whatever configuration matters for YOUR agent
+        self.set_metadata("planning_strategy", "react")
+        self.set_metadata("tools", ["search", "calculator"])
+        self.set_metadata("prompt_version", "v2.1")
+        self.set_metadata("planner", "o3")
+        self.set_metadata("executor", "haiku")
+        self.set_metadata("max_retries", 5)
+    
+    def run_task(self, task_id, task_data):
+        ...
+```
+
+For non-Python agents, include `agent_metadata` in the JSON-RPC response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "task_id": "abc",
+    "submission": "42",
+    "agent_metadata": {
+      "prompt_version": "v3",
+      "tools": ["search", "code"],
+      "temperature": 0.7
+    }
+  },
+  "id": 1
+}
+```
+
+### Querying Results
+
+Use `RunRecordStore` to store records and query by any metadata field:
+
+```python
+from harness.run_metadata import RunRecordStore, create_run_record
+
+# Create a persistent store
+store = RunRecordStore("results/runs.jsonl")
+
+# Add records (automatically done by the harness after each run)
+store.add_record(create_run_record(
+    run_id="run_001",
+    benchmark="gaia",
+    task_id="task_42",
+    agent_name="my-agent",
+    score=85.0,
+    cost_usd=0.03,
+    model_costs={"gpt-4o": 0.03},
+    agent_metadata={"planning_strategy": "react", "prompt_version": "v2.1"}
+))
+
+# Query by metadata fields
+react_runs = store.query(agent_metadata__planning_strategy="react")
+v2_runs = store.query(agent_metadata__prompt_version="v2.1", benchmark="gaia")
+
+# Compute ablation comparison
+react_avg = sum(r.score for r in react_runs) / len(react_runs)
+cot_runs = store.query(agent_metadata__planning_strategy="cot")
+cot_avg = sum(r.score for r in cot_runs) / len(cot_runs)
+print(f"ReAct: {react_avg:.1f} vs CoT: {cot_avg:.1f}")
+
+# Inspect what metadata keys are in use
+store.get_metadata_keys("my-agent")
+# → {"planning_strategy", "prompt_version", "tools", "planner", "executor", ...}
+```
+
 ## Output Organization
 
 Results are organized by benchmark and run ID:

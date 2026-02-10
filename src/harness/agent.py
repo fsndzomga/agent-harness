@@ -51,6 +51,7 @@ class Agent:
         self._metrics: dict[str, Any] = {}  # Per-task metrics
         self._tool_sequence: list[str] = []  # Track tool usage order
         self._completion_count: int = 0  # Tracks completions per task
+        self._metadata: dict[str, Any] = {}  # Agent metadata for RunRecord
     
     @property
     def model(self) -> str:
@@ -272,6 +273,44 @@ class Agent:
         """Get all metrics for the current task."""
         return self._metrics.copy()
     
+    def set_metadata(self, key: str, value: Any) -> None:
+        """Set agent metadata for ablation tracking.
+        
+        This metadata will be stored in RunRecord.agent_metadata for
+        later analysis. Use this to track configuration that affects
+        your agent's performance across runs.
+        
+        Args:
+            key: Metadata key (e.g., "planning_strategy", "tools", "prompt_version")
+            value: Any JSON-serializable value
+        
+        Examples:
+            self.set_metadata("planning_strategy", "react")
+            self.set_metadata("tools", ["search", "calculator"])
+            self.set_metadata("prompt_version", "v2.1")
+            self.set_metadata("max_retries", 5)
+        """
+        self._metadata[key] = value
+    
+    def get_metadata(self) -> dict[str, Any]:
+        """Get all agent metadata."""
+        return self._metadata.copy()
+    
+    def get_agent_metadata(self) -> dict[str, Any]:
+        """Get combined metadata for RunRecord (metadata + some metrics)."""
+        # Combine explicit metadata with key metrics
+        combined = self._metadata.copy()
+        
+        # Add useful metrics to metadata for ablation analysis
+        if self._metrics:
+            combined.update({
+                "total_steps": self._metrics.get("steps", 0),
+                "total_llm_calls": self._completion_count,
+                "tools_used": list(self._metrics.get("tool_counts", {}).keys()),
+            })
+        
+        return combined
+    
     # =========================================================================
     # JSON-RPC communication
     # =========================================================================
@@ -283,6 +322,10 @@ class Agent:
         # Include metrics if any were recorded
         if self._metrics:
             result["metrics"] = self._metrics
+        
+        # Include agent metadata for RunRecord tracking
+        if self._metadata:
+            result["agent_metadata"] = self.get_agent_metadata()
         
         msg = {
             "jsonrpc": "2.0",

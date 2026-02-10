@@ -2,13 +2,16 @@
 
 This module provides a protocol for extracting and aggregating
 statistics from trace logs, regardless of provider.
+
+It includes both the complex RunMetadata for detailed tracking
+and the simplified RunRecord for flexible agent-driven metadata.
 """
 
 import json
 import subprocess
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +53,54 @@ def get_git_info() -> dict:
         pass  # Git not available or timeout
     
     return info
+
+
+@dataclass
+class RunRecord:
+    """Simple run record for flexible agent metadata tracking.
+    
+    This is a simplified alternative to RunMetadata that lets agents
+    self-report whatever metadata matters to them. The harness tracks
+    the essential information (results, costs) while agents populate
+    agent_metadata however they want for their own ablation studies.
+    """
+    run_id: str
+    benchmark: str
+    task_id: str
+    agent_name: str
+    agent_metadata: dict[str, Any]  # Agent self-reports whatever it wants
+    score: float
+    cost_usd: float
+    model_costs: dict[str, float]
+    timestamp: datetime
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        d = asdict(self)
+        d['timestamp'] = self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else self.timestamp
+        return d
+    
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RunRecord":
+        """Create from JSON dict."""
+        # Handle timestamp conversion
+        timestamp = data.get('timestamp')
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+        elif not isinstance(timestamp, datetime):
+            timestamp = datetime.now()
+        
+        return cls(
+            run_id=data.get('run_id', str(uuid.uuid4())),
+            benchmark=data.get('benchmark', ''),
+            task_id=data.get('task_id', ''),
+            agent_name=data.get('agent_name', ''),
+            agent_metadata=data.get('agent_metadata', {}),
+            score=data.get('score', 0.0),
+            cost_usd=data.get('cost_usd', 0.0),
+            model_costs=data.get('model_costs', {}),
+            timestamp=timestamp
+        )
 
 
 @dataclass
@@ -653,3 +704,198 @@ def save_run_metadata(run: RunMetadata, output_dir: Path) -> Path:
     run_path = output_dir / "run.json"
     run_path.write_text(json.dumps(run.to_dict(), indent=2))
     return run_path
+
+
+class RunRecordStore:
+    """Simple storage and querying for RunRecord instances.
+    
+    This provides a lightweight way to store and query run records
+    for ablation analysis without imposing structure on agent metadata.
+    """
+    
+    def __init__(self, storage_path: Path | str = None):
+        """Initialize store with optional storage path.
+        
+        Args:
+            storage_path: Path to JSONL file for storage. If None, uses in-memory only.
+        """
+        self.storage_path = Path(storage_path) if storage_path else None
+        self._records: list[RunRecord] = []
+        self._load_records()
+    
+    def _load_records(self):
+        """Load existing records from storage."""
+        if self.storage_path and self.storage_path.exists():
+            try:
+                with open(self.storage_path, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            data = json.loads(line)
+                            self._records.append(RunRecord.from_dict(data))
+            except (json.JSONDecodeError, FileNotFoundError):
+                # If file is corrupted or doesn't exist, start fresh
+                self._records = []
+    
+    def add_record(self, record: RunRecord) -> None:
+        """Add a new run record."""
+        self._records.append(record)
+        self._persist_record(record)
+    
+    def _persist_record(self, record: RunRecord) -> None:
+        """Append record to storage file."""
+        if self.storage_path:
+            # Ensure directory exists
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(self.storage_path, 'a') as f:
+                f.write(json.dumps(record.to_dict()) + '\n')
+    
+    def query(self, **filters) -> list[RunRecord]:
+        """Query records with simple filtering.
+        
+        Args:
+            **filters: Key-value pairs to filter on. Supports:
+                - Direct field matching: benchmark="arithmetic"
+                - Agent metadata matching: Use 'agent_metadata__key' syntax
+        
+        Returns:
+            List of matching RunRecord instances
+        """
+        results = []
+        
+        for record in self._records:
+            matches = True
+            
+            for key, value in filters.items():
+                if key.startswith('agent_metadata__'):
+                    # Query on agent metadata
+                    meta_key = key[len('agent_metadata__'):]
+                    if meta_key not in record.agent_metadata or record.agent_metadata[meta_key] != value:
+                        matches = False
+                        break
+                elif hasattr(record, key):
+                    # Query on direct field  
+                    if getattr(record, key) != value:
+                        matches = False
+                        break
+                else:
+                    # Unknown field, no match
+                    matches = False
+                    break
+            
+            if matches:
+                results.append(record)
+        
+        return results
+    
+    def get_benchmarks(self) -> set[str]:
+        """Get all unique benchmarks in the store."""
+        return {r.benchmark for r in self._records}
+    
+    def get_agents(self) -> set[str]:
+        """Get all unique agent names in the store."""
+        return {r.agent_name for r in self._records}
+    
+    def get_metadata_keys(self, agent_name: str = None) -> set[str]:
+        """Get all unique keys used in agent_metadata.
+        
+        Args:
+            agent_name: If provided, only return keys for this agent
+        """
+        keys = set()
+        for record in self._records:
+            if agent_name is None or record.agent_name == agent_name:
+                keys.update(record.agent_metadata.keys())
+        return keys
+    
+    def stats(self) -> dict[str, Any]:
+        """Get basic statistics about the store."""
+        return {
+            "total_records": len(self._records),
+            "benchmarks": list(self.get_benchmarks()),
+            "agents": list(self.get_agents()),
+            "date_range": {
+                "earliest": min(r.timestamp for r in self._records) if self._records else None,
+                "latest": max(r.timestamp for r in self._records) if self._records else None
+            }
+        }
+
+
+def create_run_record(
+    run_id: str,
+    benchmark: str, 
+    task_id: str,
+    agent_name: str,
+    score: float,
+    cost_usd: float = 0.0,
+    model_costs: dict[str, float] = None,
+    agent_metadata: dict[str, Any] = None,
+    timestamp: datetime = None
+) -> RunRecord:
+    """Create a RunRecord with sensible defaults.
+    
+    Args:
+        run_id: Unique run identifier
+        benchmark: Name of benchmark
+        task_id: Task identifier
+        agent_name: Name of the agent
+        score: Final score (0-100)
+        cost_usd: Total cost in USD
+        model_costs: Per-model cost breakdown
+        agent_metadata: Agent-specific metadata (planning strategy, tools, etc.)
+        timestamp: When the run occurred (defaults to now)
+    """
+    return RunRecord(
+        run_id=run_id,
+        benchmark=benchmark,
+        task_id=task_id,
+        agent_name=agent_name,
+        score=score,
+        cost_usd=cost_usd,
+        model_costs=model_costs or {},
+        agent_metadata=agent_metadata or {},
+        timestamp=timestamp or datetime.now(timezone.utc)
+    )
+
+
+def run_metadata_to_run_records(metadata: RunMetadata) -> list[RunRecord]:
+    """Convert RunMetadata to a list of RunRecord instances (one per task)."""
+    records = []
+    
+    for task_stat in metadata.task_stats:
+        # Get score for this task from the first grader
+        task_score = 0.0
+        if metadata.scores:
+            first_grader_results = list(metadata.scores.values())[0]
+            # This is a simplification - we'd need to match task_id to grading results
+            # For now, just use the overall score
+            task_score = first_grader_results.get('score', 0.0)
+        else:
+            task_score = metadata.score if metadata.total_graded > 0 else 0.0
+        
+        # Extract agent metadata from task metrics
+        agent_metadata = task_stat.metrics or {}
+        
+        # Add some run-level context that might be useful for ablations
+        agent_metadata.update({
+            'model': metadata.model,
+            'parallel': metadata.parallel,
+            'max_retries': metadata.max_retries,
+            'task_timeout': metadata.task_timeout,
+        })
+        
+        record = RunRecord(
+            run_id=metadata.run_id,
+            benchmark=metadata.benchmark or "unknown",
+            task_id=task_stat.task_id,
+            agent_name=metadata.agent,
+            score=task_score,
+            cost_usd=task_stat.cost_usd,
+            model_costs={metadata.model: task_stat.cost_usd} if metadata.model else {},
+            agent_metadata=agent_metadata,
+            timestamp=datetime.fromisoformat(metadata.timestamp.replace('Z', '+00:00')) if isinstance(metadata.timestamp, str) else datetime.now(timezone.utc)
+        )
+        
+        records.append(record)
+    
+    return records

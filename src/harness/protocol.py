@@ -48,6 +48,7 @@ class Submission:
     answer: str
     trace: list[dict] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)  # Agent-reported KPIs
+    agent_metadata: dict[str, Any] = field(default_factory=dict)  # Agent metadata for RunRecord
     
     @classmethod
     def from_jsonrpc(cls, line: str) -> "Submission":
@@ -62,4 +63,5 @@ class Submission:
             answer=result["submission"],
             trace=result.get("trace", []),
             metrics=result.get("metrics", {}),
+            agent_metadata=result.get("agent_metadata", {}),
         )
