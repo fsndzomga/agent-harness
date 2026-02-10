@@ -131,6 +131,8 @@ class ContainerManager:
         self._sessions: dict[str, ContainerSession] = {}
         # task_id → task_dir (Path)
         self._task_dirs: dict[str, Path] = {}
+        # task_id → list of image names built for cleanup
+        self._image_names: dict[str, list[str]] = {}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -155,6 +157,9 @@ class ContainerManager:
         image_prefix = f"tb__{task_id}".replace(".", "-")
         container_name = f"harness-{task_id}".replace(".", "-")
         image_name = f"{image_prefix}__client"
+
+        # Track image names for cleanup after task completes
+        self._image_names[task_id] = [image_name, image_prefix]
 
         ctx = spin_up_terminal(
             client_container_name=container_name,
@@ -279,7 +284,7 @@ class ContainerManager:
             return False, {"error": str(e)}
 
     def stop(self, task_id: str) -> None:
-        """Stop and remove the container for the given task."""
+        """Stop and remove the container and its images for the given task."""
         pair = self._terminals.pop(task_id, None)
         if pair is not None:
             _, ctx = pair
@@ -289,6 +294,10 @@ class ContainerManager:
                 pass
         self._sessions.pop(task_id, None)
         self._task_dirs.pop(task_id, None)
+
+        # Remove Docker images built for this task to reclaim disk space
+        image_names = self._image_names.pop(task_id, [])
+        self._cleanup_images(image_names)
 
     def stop_all(self) -> None:
         """Stop all running containers."""
@@ -300,6 +309,52 @@ class ContainerManager:
         return self._sessions.get(task_id)
 
     # -- helpers -------------------------------------------------------------
+
+    def _cleanup_images(self, image_names: list[str]) -> None:
+        """Remove Docker images by name/prefix to reclaim disk space.
+
+        Silently ignores images that don't exist or are still in use.
+        Also removes any dangling images left over from the build.
+        """
+        if not image_names:
+            return
+
+        for name in image_names:
+            # Remove exact image name
+            try:
+                subprocess.run(
+                    ["docker", "rmi", "-f", name],
+                    capture_output=True, timeout=30,
+                )
+            except Exception:
+                pass
+
+            # Also remove any images with this prefix (e.g. compose-built service images)
+            try:
+                result = subprocess.run(
+                    ["docker", "images", "--filter", f"reference={name}*",
+                     "--format", "{{.ID}}"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    image_ids = result.stdout.strip().split("\n")
+                    for img_id in image_ids:
+                        if img_id.strip():
+                            subprocess.run(
+                                ["docker", "rmi", "-f", img_id.strip()],
+                                capture_output=True, timeout=15,
+                            )
+            except Exception:
+                pass
+
+        # Clean up dangling images from builds
+        try:
+            subprocess.run(
+                ["docker", "image", "prune", "-f"],
+                capture_output=True, timeout=30,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _ensure_deps() -> None:
