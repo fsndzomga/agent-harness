@@ -169,7 +169,7 @@ class TestContinueIntegration:
         for tid in success_task_ids:
             results_data.append({
                 "task_id": tid,
-                "status": "success",
+                "status": "completed",
                 "submission": "42",
                 "error": None,
                 "attempts": 1,
@@ -178,7 +178,7 @@ class TestContinueIntegration:
         for tid in error_task_ids:
             results_data.append({
                 "task_id": tid,
-                "status": "failed",
+                "status": "errored",
                 "submission": None,
                 "error": "Agent timed out",
                 "attempts": 3,
@@ -205,8 +205,8 @@ class TestContinueIntegration:
             "benchmark": "arithmetic",
             "model": None,
             "total": len(results_data),
-            "success": len(success_task_ids),
-            "failed": len(error_task_ids),
+            "completed": len(success_task_ids),
+            "errored": len(error_task_ids),
             "results": results_data,
         }))
 
@@ -261,8 +261,8 @@ class TestContinueIntegration:
 
         # Verify summary.json was updated
         summary = json.loads((run_dir / "summary.json").read_text())
-        assert summary["success"] == 2
-        assert summary["failed"] == 0
+        assert summary["completed"] == 2
+        assert summary["errored"] == 0
 
         # Verify trace file was regenerated for errored task
         trace_path = run_dir / "trace_arith_000.jsonl"
@@ -329,12 +329,12 @@ class TestContinueIntegration:
             "benchmark": "arithmetic",
             "model": None,
             "total": 2,
-            "success": 1,
-            "failed": 1,
+            "completed": 1,
+            "errored": 1,
             "results": [
-                {"task_id": "arith_000", "status": "success", "submission": "42",
+                {"task_id": "arith_000", "status": "completed", "submission": "42",
                  "error": None, "attempts": 1, "duration_ms": 100},
-                {"task_id": "arith_001", "status": "failed", "submission": None,
+                {"task_id": "arith_001", "status": "errored", "submission": None,
                  "error": "timed out", "attempts": 3, "duration_ms": 5000},
             ],
         }))
@@ -433,30 +433,30 @@ class TestLoadStatusFile:
         """Correctly parses JSONL entries."""
         status_path = tmp_path / "status.jsonl"
         status_path.write_text(
-            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
-            + json.dumps({"task_id": "t2", "status": "failed", "error": "timeout"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed", "submission": "42"}) + "\n"
+            + json.dumps({"task_id": "t2", "status": "errored", "error": "timeout"}) + "\n"
         )
         result = load_status_file(status_path)
         assert len(result) == 2
-        assert result["t1"]["status"] == "success"
-        assert result["t2"]["status"] == "failed"
+        assert result["t1"]["status"] == "completed"
+        assert result["t2"]["status"] == "errored"
 
     def test_last_entry_wins(self, tmp_path):
         """When a task appears multiple times, last entry wins."""
         status_path = tmp_path / "status.jsonl"
         status_path.write_text(
-            json.dumps({"task_id": "t1", "status": "failed", "error": "timeout"}) + "\n"
-            + json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "errored", "error": "timeout"}) + "\n"
+            + json.dumps({"task_id": "t1", "status": "completed", "submission": "42"}) + "\n"
         )
         result = load_status_file(status_path)
-        assert result["t1"]["status"] == "success"
+        assert result["t1"]["status"] == "completed"
 
     def test_skips_bad_lines(self, tmp_path):
         """Malformed lines are silently skipped."""
         status_path = tmp_path / "status.jsonl"
         status_path.write_text(
             "not json\n"
-            + json.dumps({"task_id": "t1", "status": "success"}) + "\n"
+            + json.dumps({"task_id": "t1", "status": "completed"}) + "\n"
             + "{bad json\n"
         )
         result = load_status_file(status_path)
@@ -510,8 +510,8 @@ class TestRecoverRunState:
             "task_ids": ["t1", "t2", "t3"],
         }))
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
-            + json.dumps({"task_id": "t2", "status": "failed", "error": "crash"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed", "submission": "42"}) + "\n"
+            + json.dumps({"task_id": "t2", "status": "errored", "error": "crash"}) + "\n"
         )
         state = recover_run_state(run_dir)
         assert state["run_id"] == "run1"
@@ -525,7 +525,7 @@ class TestRecoverRunState:
         run_dir = tmp_path / "run1"
         run_dir.mkdir()
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed", "submission": "42"}) + "\n"
         )
         state = recover_run_state(run_dir)
         assert state["completed_task_ids"] == ["t1"]
@@ -547,7 +547,7 @@ class TestRecoverRunState:
         }))
         # Only t1 succeeded
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "t1", "status": "success", "submission": "42"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed", "submission": "42"}) + "\n"
         )
         # t2 has a trace file (was in-progress) but no status entry
         (run_dir / "trace_t2.jsonl").write_text(
@@ -598,7 +598,7 @@ class TestRecoverRunState:
         assert state["error_task_ids"] == ["t1"]
         result = [r for r in state["results"] if r["task_id"] == "t1"][0]
         assert result["error"] == "boom"
-        assert result["status"] == "failed"
+        assert result["status"] == "errored"
 
     def test_trace_scan_interrupted(self, tmp_path):
         """Trace with task_start but no completion is 'interrupted'."""
@@ -620,9 +620,9 @@ class TestRecoverRunState:
         """status.jsonl entries override trace scanning results."""
         run_dir = tmp_path / "run1"
         run_dir.mkdir()
-        # status.jsonl says success
+        # status.jsonl says completed
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "t1", "status": "success", "submission": "correct"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed", "submission": "correct"}) + "\n"
         )
         # trace file still has only task_start (would be interrupted)
         lines = [
@@ -678,7 +678,7 @@ class TestFindRunDirEnhanced:
         run_dir = tmp_path / "gaia" / "gaia-run-123"
         run_dir.mkdir(parents=True)
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "t1", "status": "success"}) + "\n"
+            json.dumps({"task_id": "t1", "status": "completed"}) + "\n"
         )
         result = find_run_dir("gaia-run-123", tmp_path)
         assert result == run_dir
@@ -746,14 +746,14 @@ class TestStatusFileWriting:
         results = asyncio.run(runner.run_all([task]))
 
         assert len(results) == 1
-        assert results[0].status == "success"
+        assert results[0].status == "completed"
 
         # Check status.jsonl was written
         status_path = tmp_path / "status.jsonl"
         assert status_path.exists()
         status_map = load_status_file(status_path)
         assert "test_task" in status_map
-        assert status_map["test_task"]["status"] == "success"
+        assert status_map["test_task"]["status"] == "completed"
         assert "timestamp" in status_map["test_task"]
 
     def test_status_written_on_failure(self, tmp_path):
@@ -775,13 +775,13 @@ class TestStatusFileWriting:
         results = asyncio.run(runner.run_all([task]))
 
         assert len(results) == 1
-        assert results[0].status == "failed"
+        assert results[0].status == "errored"
 
         status_path = tmp_path / "status.jsonl"
         assert status_path.exists()
         status_map = load_status_file(status_path)
         assert "fail_task" in status_map
-        assert status_map["fail_task"]["status"] == "failed"
+        assert status_map["fail_task"]["status"] == "errored"
 
 
 class TestContinueInterruptedRun:
@@ -807,8 +807,8 @@ class TestContinueInterruptedRun:
 
         # Only 2 out of 5 tasks completed before kill
         (run_dir / "status.jsonl").write_text(
-            json.dumps({"task_id": "arith_000", "status": "success", "submission": "42", "attempts": 1, "duration_ms": 100}) + "\n"
-            + json.dumps({"task_id": "arith_001", "status": "success", "submission": "42", "attempts": 1, "duration_ms": 150}) + "\n"
+            json.dumps({"task_id": "arith_000", "status": "completed", "submission": "42", "attempts": 1, "duration_ms": 100}) + "\n"
+            + json.dumps({"task_id": "arith_001", "status": "completed", "submission": "42", "attempts": 1, "duration_ms": 150}) + "\n"
         )
 
         # Trace files for completed tasks
@@ -852,7 +852,7 @@ class TestContinueInterruptedRun:
         # summary.json should have all 5 tasks
         summary = json.loads((run_dir / "summary.json").read_text())
         assert summary["total"] == 5
-        assert summary["success"] == 5  # echo agent succeeds on everything
+        assert summary["completed"] == 5  # echo agent completes everything
 
     def test_continue_interrupted_preserves_completed(self, tmp_path):
         """Previously completed tasks are not re-run."""
@@ -869,7 +869,7 @@ class TestContinueInterruptedRun:
         # The original completed tasks should still have their original traces
         # (not overwritten by re-running)
         summary = json.loads((run_dir / "summary.json").read_text())
-        completed_ids = {r["task_id"] for r in summary["results"] if r["status"] == "success"}
+        completed_ids = {r["task_id"] for r in summary["results"] if r["status"] == "completed"}
         assert "arith_000" in completed_ids
         assert "arith_001" in completed_ids
 

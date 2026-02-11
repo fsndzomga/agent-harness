@@ -34,7 +34,7 @@ class RetryConfig:
 class TaskResult:
     """Result of running a single task."""
     task_id: str
-    status: str  # "success", "failed", "timeout", "cancelled"
+    status: str  # "completed", "errored" (execution status, not grading result)
     submission: str | None = None
     error: str | None = None
     error_type: ErrorType | None = None
@@ -59,15 +59,15 @@ def classify_error(error: Exception) -> tuple[ErrorType, float | None]:
         delay_hint = float(match.group(1)) if match else None
         return ErrorType.RETRYABLE, delay_hint
     
-    # Server errors
+    # Server errors (transient)
     if any(code in error_str for code in ["500", "502", "503", "504"]):
         return ErrorType.RETRYABLE, None
     
-    # Timeouts
+    # Timeouts - don't retry (would inflate pass@k into pass@3k)
     if "timeout" in error_str or "timed out" in error_str:
-        return ErrorType.RETRYABLE, None
+        return ErrorType.NON_RETRYABLE, None
     
-    # Overloaded/capacity
+    # Overloaded/capacity (API-side, not task timeout)
     if "overloaded" in error_str or "capacity" in error_str:
         return ErrorType.RETRYABLE, 5.0  # Wait a bit
     
@@ -196,7 +196,7 @@ class ParallelRunner:
                 
                 result = TaskResult(
                     task_id=task.id,
-                    status="success",
+                    status="completed",
                     submission=submission.answer,
                     attempts=attempt,
                     duration_ms=duration_ms,
@@ -218,7 +218,7 @@ class ParallelRunner:
                     
                     result = TaskResult(
                         task_id=task.id,
-                        status="failed",
+                        status="errored",
                         error=last_error,
                         error_type=error_type,
                         attempts=attempt,
@@ -250,7 +250,7 @@ class ParallelRunner:
         
         result = TaskResult(
             task_id=task.id,
-            status="failed",
+            status="errored",
             error=f"Failed after {cfg.max_retries} attempts: {last_error}",
             error_type=last_error_type,
             attempts=cfg.max_retries,

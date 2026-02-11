@@ -156,7 +156,7 @@ class ModelStats:
 class TaskStats:
     """Per-task statistics."""
     task_id: str
-    status: str  # success, error, timeout
+    status: str  # completed, errored (execution status, not grading result)
     attempts: int = 1
     usage: UsageStats = field(default_factory=UsageStats)
     cost_usd: float = 0.0
@@ -582,10 +582,10 @@ def aggregate_run_stats(
     
     for result in results:
         task_id = result.task_id
-        is_success = result.status == "success"
+        is_completed = result.status == "completed"
         
         run.num_tasks_run += 1
-        if is_success:
+        if is_completed:
             run.num_tasks_completed += 1
             run.completed_task_ids.append(task_id)
         else:
@@ -628,7 +628,7 @@ def aggregate_run_stats(
         ms.usage = ms.usage + usage
         ms.cost_usd += cost
         ms.latency_ms_total += latency
-        if not is_success:
+        if not is_completed:
             ms.errors += 1
     
     # Calculate averages

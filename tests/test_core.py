@@ -144,3 +144,66 @@ class TestTraceLogger:
         second = json.loads(lines[1])
         assert second["type"] == "custom"
         assert second["data"] == 123
+
+
+class TestErrorClassification:
+    """Test error classification for retry logic."""
+
+    def test_timeout_not_retryable(self):
+        """Timeouts should NOT be retried (preserves pass@1 accuracy)."""
+        from harness.parallel import classify_error, ErrorType
+
+        # Various timeout error messages
+        timeout_errors = [
+            Exception("Agent timed out after 300s"),
+            Exception("Request timed out"),
+            Exception("timeout error"),
+            Exception("Task TIMED OUT"),
+        ]
+
+        for err in timeout_errors:
+            error_type, _ = classify_error(err)
+            assert error_type == ErrorType.NON_RETRYABLE, f"Timeout should not retry: {err}"
+
+    def test_rate_limit_retryable(self):
+        """Rate limits (429) should be retried."""
+        from harness.parallel import classify_error, ErrorType
+
+        rate_limit_errors = [
+            Exception("Error 429: Too many requests"),
+            Exception("rate limit exceeded"),
+            Exception("Rate Limit Error"),
+        ]
+
+        for err in rate_limit_errors:
+            error_type, _ = classify_error(err)
+            assert error_type == ErrorType.RETRYABLE, f"Rate limit should retry: {err}"
+
+    def test_server_error_retryable(self):
+        """Server errors (5xx) should be retried."""
+        from harness.parallel import classify_error, ErrorType
+
+        server_errors = [
+            Exception("HTTP 500 Internal Server Error"),
+            Exception("502 Bad Gateway"),
+            Exception("503 Service Unavailable"),
+            Exception("504 Gateway Timeout"),
+        ]
+
+        for err in server_errors:
+            error_type, _ = classify_error(err)
+            assert error_type == ErrorType.RETRYABLE, f"Server error should retry: {err}"
+
+    def test_auth_error_not_retryable(self):
+        """Auth errors should NOT be retried."""
+        from harness.parallel import classify_error, ErrorType
+
+        auth_errors = [
+            Exception("401 Unauthorized"),
+            Exception("403 Forbidden"),
+            Exception("Invalid API key"),
+        ]
+
+        for err in auth_errors:
+            error_type, _ = classify_error(err)
+            assert error_type == ErrorType.NON_RETRYABLE, f"Auth error should not retry: {err}"

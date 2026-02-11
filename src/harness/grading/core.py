@@ -31,7 +31,7 @@ def run_graders(
         graders: Grader instances (e.g. from ``resolve_graders``).
         submissions: List of dicts with keys ``task_id``, ``submission``,
             ``expected``, and optionally ``question``.
-        failed_tasks: Tasks that had no submission (status != success).
+        failed_tasks: Tasks that had no submission (status != completed).
             Each dict must have ``task_id`` and ``expected``.
 
     Returns:

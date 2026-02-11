@@ -312,9 +312,9 @@ def run(
     results = asyncio.run(run_with_progress())
     
     # Summary
-    success = sum(1 for r in results if r.status == "success")
-    failed = len(results) - success
-    click.echo(f"\nCompleted: {success}/{len(results)} succeeded, {failed} failed")
+    completed = sum(1 for r in results if r.status == "completed")
+    errored = len(results) - completed
+    click.echo(f"\nCompleted: {completed}/{len(results)}, Errored: {errored}")
     
     # Grade if benchmark has grader
     grade_results_multi = None
@@ -357,8 +357,8 @@ def run(
         "benchmark": benchmark or tasks_file,
         "model": model,
         "total": len(results),
-        "success": success,
-        "failed": failed,
+        "completed": completed,
+        "errored": errored,
         "results": [
             {
                 "task_id": r.task_id,
@@ -672,13 +672,13 @@ def recover_run_state(run_dir: Path) -> dict:
                     has_start = True
                 elif etype == "task_complete":
                     trace_scan[tid] = {
-                        "status": "success",
+                        "status": "completed",
                         "submission": evt.get("submission"),
                         "duration_ms": evt.get("duration_ms", 0),
                     }
                 elif etype == "task_error":
                     trace_scan[tid] = {
-                        "status": "failed",
+                        "status": "errored",
                         "error": evt.get("error"),
                     }
             # If trace has a start but no completion/error → interrupted
@@ -700,7 +700,7 @@ def recover_run_state(run_dir: Path) -> dict:
         if tid in status_map:
             # Real-time status file — highest priority
             entry = status_map[tid]
-            status = entry.get("status", "failed")
+            status = entry.get("status", "errored")
             results_data.append({
                 "task_id": tid,
                 "status": status,
@@ -709,14 +709,14 @@ def recover_run_state(run_dir: Path) -> dict:
                 "attempts": entry.get("attempts", 1),
                 "duration_ms": entry.get("duration_ms", 0),
             })
-            if status == "success":
+            if status == "completed":
                 completed_ids.append(tid)
             else:
                 error_ids.append(tid)
         elif tid in trace_scan:
             # Scanned from trace file events
             ts = trace_scan[tid]
-            ts_status = ts.get("status", "failed")
+            ts_status = ts.get("status", "errored")
             results_data.append({
                 "task_id": tid,
                 "status": ts_status,
@@ -725,10 +725,10 @@ def recover_run_state(run_dir: Path) -> dict:
                 "attempts": 1,
                 "duration_ms": ts.get("duration_ms", 0),
             })
-            if ts_status == "success":
+            if ts_status == "completed":
                 completed_ids.append(tid)
             else:
-                # interrupted and failed both need re-running
+                # interrupted and errored both need re-running
                 error_ids.append(tid)
         else:
             # Task has no status entry and no trace — never started
@@ -935,9 +935,9 @@ def continue_run(
     new_results = asyncio.run(run_with_progress())
 
     # Report on retry results
-    new_success = sum(1 for r in new_results if r.status == "success")
-    new_failed = len(new_results) - new_success
-    click.echo(f"\nRetry results: {new_success}/{len(new_results)} succeeded, {new_failed} failed")
+    new_completed = sum(1 for r in new_results if r.status == "completed")
+    new_errored = len(new_results) - new_completed
+    click.echo(f"\nRetry results: {new_completed}/{len(new_results)} completed, {new_errored} errored")
 
     # Get previously completed results from recover_run_state or summary.json
     old_results_data = run_data.get("results", [])
@@ -966,8 +966,8 @@ def continue_run(
         })
 
     # Total counts across merged results
-    total_success = sum(1 for r in merged_results_data if r["status"] == "success")
-    total_failed = len(merged_results_data) - total_success
+    total_completed = sum(1 for r in merged_results_data if r["status"] == "completed")
+    total_errored = len(merged_results_data) - total_completed
 
     # Grade all submissions (not just the retried ones)
     grade_results_multi = None
@@ -1008,8 +1008,8 @@ def continue_run(
         "benchmark": benchmark_name,
         "model": eff_model,
         "total": len(merged_results_data),
-        "success": total_success,
-        "failed": total_failed,
+        "completed": total_completed,
+        "errored": total_errored,
         "results": merged_results_data,
     }
     summary_path = run_dir / "summary.json"
@@ -1077,11 +1077,11 @@ def continue_run(
             click.echo(f"Cost: ${cost:.2f}")
 
     # Final status
-    if new_failed == 0:
-        click.echo(f"\nAll {len(retry_task_ids)} previously incomplete/errored tasks now succeeded!")
+    if new_errored == 0:
+        click.echo(f"\nAll {len(retry_task_ids)} previously incomplete/errored tasks now completed!")
     else:
-        still_errored = [r.task_id for r in new_results if r.status != "success"]
-        click.echo(f"\n{new_failed} task(s) still failing: {', '.join(still_errored[:10])}"
+        still_errored = [r.task_id for r in new_results if r.status != "completed"]
+        click.echo(f"\n{new_errored} task(s) still errored: {', '.join(still_errored[:10])}"
                    + (f" (and {len(still_errored) - 10} more)" if len(still_errored) > 10 else ""))
 
 
