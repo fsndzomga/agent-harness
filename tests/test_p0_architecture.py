@@ -694,7 +694,10 @@ class TestNewDirectBenchmarks:
     ])
     def test_get_tasks_returns_list(self, name):
         bench = get_benchmark(name)
-        tasks = bench.get_tasks()
+        try:
+            tasks = bench.get_tasks()
+        except ImportError as exc:
+            pytest.skip(f"Missing dependency: {exc}")
         assert isinstance(tasks, list)
 
     def test_all_new_benchmarks_in_list(self):
