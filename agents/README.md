@@ -18,6 +18,8 @@ This directory contains agents that can be evaluated using the harness.
 | `simple_qa_agent.py` | Single-file | Single LLM call, no tools |
 | `metrics_agent.py` | Single-file | Demonstrates metrics tracking |
 | `hal_generalist/` | Module | smolagents CodeAgent with web search + file tools (GAIA) |
+| `assistant_bench_agent/` | Module | Memory-based ReAct agent with keyword search (AssistantBench) |
+| `compact_search_agent/` | Module | Keyword search agent with LLM-driven memory compaction (AssistantBench) |
 
 ## Usage
 
@@ -25,12 +27,18 @@ This directory contains agents that can be evaluated using the harness.
 # Single-file agent
 harness run --agent agents/echo_agent.py --benchmark arithmetic
 
-# Module agent
+# Module agent (use directory path so the venv is auto-detected)
 harness run --agent agents/hal_generalist --benchmark gaia-level1 --model openrouter/deepseek/deepseek-chat-v3-0324
+
+# AssistantBench agents
+harness run --agent agents/assistant_bench_agent --benchmark assistant-bench --model openrouter/deepseek/deepseek-chat-v3-0324
+harness run --agent agents/compact_search_agent --benchmark assistant-bench --model openrouter/deepseek/deepseek-chat-v3-0324
 
 # Install module agent deps first
 pip install -r agents/hal_generalist/requirements.txt
 ```
+
+> **Note:** Always pass the **directory** path for module agents (e.g. `agents/compact_search_agent`) so the harness detects the `.venv` symlink and uses the correct Python interpreter.
 
 ## Writing Your Own Agent
 
