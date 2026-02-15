@@ -205,6 +205,58 @@ def patch_run_json_scores(
 
 
 # ============================================================================
+# Benchmark-native grading
+# ============================================================================
+
+def run_benchmark_grading(
+    bench: Any,
+    results_data: list[dict[str, Any]],
+) -> list[GradeResult] | None:
+    """Run the benchmark's own ``grade()`` method over completed submissions.
+
+    Benchmarks like AssistantBench override ``grade()`` with custom logic
+    (F1 scoring, numeric closeness, list matching, etc.) that the generic
+    grader pipeline cannot replicate.
+
+    Returns a list of ``GradeResult`` objects, or ``None`` if the benchmark
+    does not have answers loaded (e.g. test split).
+    """
+    from ..benchmarks.base import ExecutionContext
+
+    if not hasattr(bench, 'grade'):
+        return None
+
+    all_tasks = bench.get_tasks()
+    task_map = {t.id: t for t in all_tasks}
+
+    grade_results: list[GradeResult] = []
+    for r in results_data:
+        task_id = r.get("task_id") or (r.task_id if hasattr(r, "task_id") else None)
+        submission = r.get("submission") if isinstance(r, dict) else getattr(r, "submission", None)
+        status = r.get("status") if isinstance(r, dict) else getattr(r, "status", None)
+
+        task = task_map.get(task_id)
+        if task is None:
+            continue
+
+        if submission is not None:
+            ctx = ExecutionContext(task_id=task_id)
+            gr = bench.grade(task, submission, ctx)
+            grade_results.append(gr)
+        else:
+            grade_results.append(GradeResult(
+                task_id=task_id,
+                passed=False,
+                score=0.0,
+                expected=bench._answers.get(task_id, ""),
+                actual=getattr(r, "error", None) or r.get("error", "no submission") if isinstance(r, dict) else "no submission",
+                method="failed",
+            ))
+
+    return grade_results if grade_results else None
+
+
+# ============================================================================
 # Helpers for building submission / failed-task lists
 # ============================================================================
 

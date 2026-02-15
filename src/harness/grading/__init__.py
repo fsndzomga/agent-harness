@@ -10,6 +10,7 @@ from .pipeline import GradingPipeline
 # Backward-compatible re-exports from the original grading module
 from .core import (
     run_graders,
+    run_benchmark_grading,
     save_grades,
     load_grades,
     load_grades_raw,
@@ -23,6 +24,7 @@ __all__ = [
     "GradingPipeline",
     # Legacy
     "run_graders",
+    "run_benchmark_grading",
     "save_grades",
     "load_grades",
     "load_grades_raw",

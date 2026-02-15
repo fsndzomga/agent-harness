@@ -321,7 +321,7 @@ def run(
     if bench and hasattr(bench, 'grade'):
         from .benchmarks.graders import resolve_graders as _resolve_graders
         from .grading import (
-            run_graders, save_grades,
+            run_graders, run_benchmark_grading, save_grades,
             build_submissions_from_results,
         )
 
@@ -340,12 +340,23 @@ def run(
             grader_instances, submissions, failed_tasks,
         )
 
+        # Run benchmark-native grading (F1, numeric closeness, etc.)
+        results_data = [
+            {"task_id": r.task_id, "submission": r.submission,
+             "status": r.status, "error": r.error}
+            for r in results
+        ]
+        bench_grades = run_benchmark_grading(bench, results_data)
+        if bench_grades:
+            grade_results_multi["benchmark"] = bench_grades
+
         # Print per-grader scores
         for gname, glist in grade_results_multi.items():
             g_passed = sum(1 for g in glist if g.passed)
             g_total = len(glist)
             g_score = (100 * g_passed / g_total) if g_total > 0 else 0
-            click.echo(f"  [{gname}] {g_passed}/{g_total} ({g_score:.1f}%)")
+            avg_score = sum(g.score for g in glist) / g_total if g_total > 0 else 0
+            click.echo(f"  [{gname}] {g_passed}/{g_total} ({g_score:.1f}%) avg_score={avg_score:.4f}")
 
         # Save grades (multi-grader format)
         grades_path = output_dir / "grades.json"
@@ -974,7 +985,7 @@ def continue_run(
     if benchmark_name and bench and hasattr(bench, 'grade'):
         from .benchmarks.graders import resolve_graders as _resolve_graders
         from .grading import (
-            run_graders, save_grades,
+            run_graders, run_benchmark_grading, save_grades,
             build_submissions_from_merged,
         )
 
@@ -992,6 +1003,11 @@ def continue_run(
         grade_results_multi = run_graders(
             grader_instances, submissions, failed_tasks,
         )
+
+        # Run benchmark-native grading
+        bench_grades = run_benchmark_grading(bench, merged_results_data)
+        if bench_grades:
+            grade_results_multi["benchmark"] = bench_grades
 
         for gname, glist in grade_results_multi.items():
             g_passed = sum(1 for g in glist if g.passed)
@@ -1177,6 +1193,12 @@ def grade_run(
     grade_results_multi = run_graders(
         grader_instances, submissions, failed_tasks,
     )
+
+    # Run benchmark-native grading
+    from .grading import run_benchmark_grading
+    bench_grades = run_benchmark_grading(bench, run_results)
+    if bench_grades:
+        grade_results_multi["benchmark"] = bench_grades
 
     # Print per-grader scores
     for gname, glist in grade_results_multi.items():

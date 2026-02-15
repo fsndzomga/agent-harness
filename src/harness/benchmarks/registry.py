@@ -90,8 +90,14 @@ def _ensure_registered():
         pass  # terminal-bench not installed
 
     # ── P0 DIRECT benchmarks ─────────────────────────────────────
-    from .assistant_bench import AssistantBenchBenchmark
+    from .assistant_bench import (
+        AssistantBenchBenchmark,
+        AssistantBenchHardBenchmark,
+        AssistantBenchMediumBenchmark,
+    )
     _BENCHMARKS["assistant-bench"] = AssistantBenchBenchmark
+    _BENCHMARKS["assistant-bench-hard"] = AssistantBenchHardBenchmark
+    _BENCHMARKS["assistant-bench-medium"] = AssistantBenchMediumBenchmark
 
     from .hle import HLEBenchmark
     _BENCHMARKS["hle"] = HLEBenchmark
