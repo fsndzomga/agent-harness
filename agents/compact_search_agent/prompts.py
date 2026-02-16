@@ -56,11 +56,12 @@ Submit your final answer. Use this ONLY when you are confident.
 
 ## Answer format guidelines
 
-- Single entity: just the name/value (e.g., "Paris" or "42")
+- Single entity: just the name/value (e.g., "Paris" or "42"). No addresses or extra detail.
 - List of items: one per line, no bullets or numbers
 - Numeric: just the number, with units if the question implies them (e.g., "$1.5 billion")
 - URL: just the URL
-- Yes/No questions: "Yes" or "No"
+- Yes/No questions: "Yes" or "No" — but ONLY if the question is truly yes/no. If it asks "which" or "what", answer with the specific entity.
+- When the question asks "which [place/thing]", answer with the NAME only, never just "Yes" or "No".
 """
 
 COMPACTION_PROMPT = """\
@@ -69,12 +70,17 @@ investigation. Condense these notes into a SHORT, DENSE summary that preserves:
 
 1. Every search query that was tried and a one-line synopsis of what was found.
 2. Every URL that was visited and the key facts extracted.
-3. Any concrete data points, numbers, names, dates, or partial answers discovered.
-4. Key reasoning conclusions reached so far.
+3. **ALL concrete data points**: numbers, prices, percentages, ratings, scores, \
+runtimes, dates, sizes, distances, and any other quantitative values.
+4. **ALL proper names**: people, businesses, places, products, URLs mentioned.
+5. Key reasoning conclusions reached so far.
+6. Any partial answers or candidate answers identified.
 
 Do NOT include filler or meta-commentary. Do NOT say "the agent searched for..." — \
 just state what was found. Write in compact bullet-point form.
 
-Keep the summary under {max_chars} characters. If you must cut something, drop \
-vague observations before concrete facts.
+PRIORITY: Concrete facts (numbers, names, URLs) are MORE important than narrative. \
+Never drop a specific data point to save space — drop vague observations instead.
+
+Keep the summary under {max_chars} characters.
 """

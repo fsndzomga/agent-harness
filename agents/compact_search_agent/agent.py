@@ -37,9 +37,10 @@ from compact_search_agent.tools import web_search, visit_webpage
 
 MAX_STEPS = 15
 COMPACT_THRESHOLD = 24_000   # compact when raw memory exceeds this (chars)
-COMPACT_TARGET = 8_000       # target size for the compacted summary
+COMPACT_TARGET = 12_000      # target size for the compacted summary
 MAX_MEMORY_CHARS = 48_000    # hard cap for safety (after compaction)
-KEEP_RECENT_STEPS = 3        # always keep the last N steps verbatim
+KEEP_RECENT_STEPS = 4        # always keep the last N steps verbatim
+MAX_DEGEN_RETRIES = 2        # retries when LLM produces degenerate output
 
 
 class CompactSearchAgent(Agent):
@@ -70,17 +71,27 @@ class CompactSearchAgent(Agent):
             # Read current memory
             memory = self._read_memory(memory_path)
 
-            # Ask LLM what to do next
-            response = self.complete([
-                Message(role="system", content=SYSTEM_PROMPT),
-                Message(role="user", content=(
-                    f"## Your Memory (read carefully)\n\n{memory}\n\n"
-                    "---\n"
-                    "Now output your next action."
-                )),
-            ], max_tokens=2048, temperature=0.0)
+            # Ask LLM what to do next (with degeneration retry)
+            raw_output = None
+            for attempt in range(1 + MAX_DEGEN_RETRIES):
+                temp = 0.0 if attempt == 0 else 0.3 + 0.2 * attempt
+                response = self.complete([
+                    Message(role="system", content=SYSTEM_PROMPT),
+                    Message(role="user", content=(
+                        f"## Your Memory (read carefully)\n\n{memory}\n\n"
+                        "---\n"
+                        "Now output your next action."
+                    )),
+                ], max_tokens=2048, temperature=temp)
 
-            raw_output = response.message.content.strip()
+                raw_output = response.message.content.strip()
+
+                if not self._is_degenerate(raw_output):
+                    break
+                self.log("degenerate_retry", step=step, attempt=attempt,
+                         output=raw_output[:200])
+                self.increment("degenerate_retries")
+
             self.log("llm_output", step=step, output=raw_output[:500])
 
             # Parse action from LLM output
@@ -277,6 +288,28 @@ class CompactSearchAgent(Agent):
 
         return header, steps
 
+    # ── Degeneration detection ─────────────────────────────────────────
+
+    @staticmethod
+    def _is_degenerate(text: str) -> bool:
+        """Detect LLM token degeneration (repetitive garbage output)."""
+        if not text or len(text) < 3:
+            return True
+        # Strip whitespace for analysis
+        chars = text.replace("\n", "").replace(" ", "").replace("\t", "")
+        if not chars:
+            return True
+        # Very low character diversity → repetitive loop
+        if len(set(chars)) / max(len(chars), 1) < 0.10:
+            return True
+        # No recognisable words (at least 3-letter sequences) in first 150 chars
+        if not re.search(r"[a-zA-Z]{3,}", text[:150]):
+            return True
+        # Detect token-level repetition (same 3-8 char chunk repeated 5+ times)
+        if re.search(r"(.{3,8})\1{4,}", chars):
+            return True
+        return False
+
     # ── Action parsing ────────────────────────────────────────────────
 
     def _parse_action(self, text: str) -> tuple[str, str]:
@@ -285,6 +318,10 @@ class CompactSearchAgent(Agent):
         Returns (action_type, payload).
         Action types: SEARCH, VISIT, THINK, ANSWER, UNKNOWN.
         """
+        # If the output is degenerate, never accept it as an answer
+        if self._is_degenerate(text):
+            return "UNKNOWN", text
+
         action_map = {
             "ANSWER": r"\[ANSWER\]\s*(.*)",
             "SEARCH": r"\[SEARCH\]\s*(.*)",
@@ -299,24 +336,49 @@ class CompactSearchAgent(Agent):
                     payload = self._clean_answer(payload)
                 return action_name, payload
 
-        # Fallback: if the whole thing looks like an answer (short, no action tag)
-        if len(text) < 200 and not any(
-            kw in text.upper() for kw in ["SEARCH", "VISIT", "THINK"]
+        # Fallback: only treat as answer if it looks like a real answer
+        # (short, contains real words, no action keywords)
+        if (
+            len(text) < 200
+            and re.search(r"[a-zA-Z]{4,}", text)
+            and not any(kw in text.upper() for kw in ["SEARCH", "VISIT", "THINK"])
         ):
-            return "ANSWER", text
+            return "ANSWER", self._clean_answer(text)
 
         return "UNKNOWN", text
 
     @staticmethod
     def _clean_answer(text: str) -> str:
-        """Strip markdown artifacts and noise from an answer."""
+        """Strip markdown artifacts, noise, and excess detail from an answer."""
+        # Remove markdown code fences
         text = re.sub(r"```\w*\n?", "", text)
-        text = text.strip().strip("'\"").strip()
+        text = text.strip().strip("'\"")
+        # Strip preamble phrases
         text = re.sub(
             r"^(Based on .*?research[,.]?\s*|According to .*?[,.]?\s*|"
-            r"From .*?findings[,.]?\s*|The answer is[:\s]*)",
+            r"From .*?findings[,.]?\s*|The answer is[:\s]*|"
+            r"My .{0,20}answer[:\s]*|After .{0,40}research[,.]?\s*|"
+            r"I found that\s*|The result is[:\s]*)",
             "", text, flags=re.IGNORECASE,
         )
+        # Strip "I don't know" / "unable to determine" type responses
+        # (these should not be submitted as answers)
+        if re.match(
+            r"^(I don'?t know|Unable to determine|Cannot determine|"
+            r"No .{0,30}(found|available|data)|I could not find)",
+            text, re.IGNORECASE,
+        ):
+            # Return empty so the caller can detect this isn't a real answer
+            return ""
+        # Strip trailing address details from place names
+        # e.g., "Renzo Gracie Jiu-Jitsu Wall Street, 22 New St, New York, NY 10005"
+        # Heuristic: if there's a comma followed by a number (street address), trim
+        addr_match = re.match(
+            r"^(.{10,}?),\s*\d+\s+[A-Z]",
+            text,
+        )
+        if addr_match:
+            text = addr_match.group(1)
         return text.strip()
 
     # ── Fallback answer extraction ────────────────────────────────────
@@ -329,8 +391,16 @@ class CompactSearchAgent(Agent):
         response = self.complete([
             Message(role="system", content=(
                 "You are given a research memory document and a question. "
-                "Based ONLY on the information in the memory, give a precise, "
-                "concise answer. Output ONLY the answer — no explanation."
+                "Based ONLY on the information in the memory, provide the best "
+                "possible answer.\n\n"
+                "RULES:\n"
+                "- Output ONLY the answer — no explanation, no caveats.\n"
+                "- NEVER say 'I don't know', 'Unable to determine', 'No data found', "
+                "or any variant. You MUST give a concrete answer.\n"
+                "- If you are uncertain, give your BEST GUESS from the data you have.\n"
+                "- For place/name questions: just the name, no address or extra detail.\n"
+                "- For numeric questions: just the number with appropriate units.\n"
+                "- For list questions: one item per line, no bullets or numbers.\n"
             )),
             Message(role="user", content=(
                 f"## Question\n{question}\n\n"
@@ -340,6 +410,17 @@ class CompactSearchAgent(Agent):
 
         answer = response.message.content.strip()
         answer = self._clean_answer(answer)
+        # If _clean_answer nullified a non-answer, try once more with higher temp
+        if not answer:
+            response = self.complete([
+                Message(role="system", content=(
+                    "Answer this question with your best guess. "
+                    "Output ONLY the answer value — nothing else."
+                )),
+                Message(role="user", content=question),
+            ], max_tokens=256, temperature=0.4)
+            answer = response.message.content.strip()
+            answer = self._clean_answer(answer) or answer
         self._append_memory(memory_path, 999, "Fallback Answer (out of steps)", answer)
         return answer
 
